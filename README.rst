@@ -17,6 +17,33 @@ These modules can be imported from the Configuration submenus titled Inputs, Out
 Custom Inputs
 =============
 
+Alicat Mass Flow Controller (Modbus RTU)
+----------------------------------------
+
+Details and code: `Mycodo-custom/custom_inputs/alicat mfc/ <https://github.com/kizniche/Mycodo-custom/blob/master/custom_inputs/alicat%20mfc>`__
+
+This Input module reads telemetry data from Alicat Mass Flow Controllers via Modbus RTU serial communication. Provides real-time monitoring of volumetric flow, mass flow, pressure, temperature, and current setpoint values. Uses RS-485 serial connection over USB adapter.
+
+--------------
+
+Hamilton pH Probe (Modbus RTU)
+------------------------------
+
+Details and code: `Mycodo-custom/custom_inputs/hamilton arc ph probe/ <https://github.com/kizniche/Mycodo-custom/blob/master/custom_inputs/hamilton%20arc%20ph%20probe>`__
+
+This Input module reads pH and temperature measurements from Hamilton ARC pH probes via Modbus RTU serial communication. Provides high-accuracy pH monitoring for industrial and laboratory applications including bioreactors, fermenters, and aquaculture systems.
+
+--------------
+
+Hamilton DO Probe (Modbus RTU)
+------------------------------
+
+Details and code: `Mycodo-custom/custom_inputs/hamilton arc do probe/ <https://github.com/kizniche/Mycodo-custom/blob/master/custom_inputs/hamilton%20arc%20do%20probe>`__
+
+This Input module reads dissolved oxygen (DO) and temperature measurements from Hamilton ARC DO probes via Modbus RTU serial communication. Provides high-accuracy DO monitoring for bioreactors, fermenters, and aquaculture systems with digital Modbus communication.
+
+--------------
+
 LoRaWAN-enabled Geiger Counter
 ------------------------------
 
@@ -71,6 +98,15 @@ LoRaWAN transceiver that then receives those measurements and transmits them to 
 Custom Outputs
 ==============
 
+Alicat Mass Flow Controller Setpoint (Modbus RTU)
+-------------------------------------------------
+
+Details and code: `Mycodo-custom/custom_outputs/alicat massflow setpoint/ <https://github.com/kizniche/Mycodo-custom/blob/master/custom_outputs/alicat%20massflow%20setpoint>`__
+
+This Output module controls the setpoint of Alicat Mass Flow Controllers via Modbus RTU serial communication. Provides a value-type output that allows Mycodo automations, PID controllers, or manual commands to dynamically adjust flow rate. Includes verification by reading back the actual setpoint.
+
+--------------
+
 On/Off Remote GPIO (gpiozero)
 -----------------------------
 
@@ -95,6 +131,24 @@ Remotely control GPIO pin duty cycles over a network with the use of [gpiozero](
 
 Custom Functions
 ================
+
+pH Control (CO2 Mass Flow Controller)
+-------------------------------------
+
+Details and code: `Mycodo-custom/custom_functions/ph controller/ <https://github.com/kizniche/Mycodo-custom/blob/master/custom_functions/ph%20controller>`__
+
+This Function implements PID-based control for maintaining a pH setpoint by regulating CO2 flow through an Alicat Mass Flow Controller. Automatically adjusts CO2 dosing to keep pH stable in bioreactors, fermenters, or aquaculture systems. Includes configurable PID gains, safety flow limits, and measurement timeout protection.
+
+--------------
+
+DO Control (Air Mass Flow Controller)
+-------------------------------------
+
+Details and code: `Mycodo-custom/custom_functions/dissolved oxygen controller/ <https://github.com/kizniche/Mycodo-custom/blob/master/custom_functions/dissolved%20oxygen%20controller>`__
+
+This Function implements PID-based control for maintaining a dissolved oxygen (DO) setpoint by regulating air flow through an Alicat Mass Flow Controller. Automatically adjusts air/O2 dosing to keep DO stable in bioreactors, fermenters, or aquaculture systems. Includes configurable PID gains, safety flow limits, and measurement timeout protection.
+
+--------------
 
 CoolBot Clone
 -------------
