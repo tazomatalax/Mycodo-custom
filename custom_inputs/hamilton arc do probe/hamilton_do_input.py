@@ -19,7 +19,7 @@ from mycodo.inputs.base_input import AbstractInput
 
 
 # ===== Hamilton Common Functions =====
-def setup_instrument(port: str, slave_address: int, baudrate: int = 19200, timeout: float = 1.0) -> minimalmodbus.Instrument:
+def setup_instrument(port: str, slave_address: int, baudrate: int = 19200, timeout: float = 2.0) -> minimalmodbus.Instrument:
     """Create and configure a Modbus RTU instrument for Hamilton probes."""
     instrument = minimalmodbus.Instrument(port, slaveaddress=slave_address, debug=False)
     instrument.serial.baudrate = baudrate
@@ -32,20 +32,33 @@ def setup_instrument(port: str, slave_address: int, baudrate: int = 19200, timeo
     return instrument
 
 
-def read_float_value(instrument: minimalmodbus.Instrument, register_start: int) -> float:
-    """Read a floating point value from registers using Hamilton's byte order."""
-    values = instrument.read_registers(register_start, 10, functioncode=3)
+def read_float_value(instrument: minimalmodbus.Instrument, register_start: int, max_retries: int = 3, retry_delay: float = 0.1) -> float:
+    """Read a floating point value from registers using Hamilton's byte order with retry logic."""
+    import time
     
-    # Combine the register values to form 32-bit integer (Hamilton format)
-    int_value = (values[3] << 16) | values[2]
+    last_exception = None
+    for attempt in range(max_retries):
+        try:
+            values = instrument.read_registers(register_start, 10, functioncode=3)
+            
+            # Combine the register values to form 32-bit integer (Hamilton format)
+            int_value = (values[3] << 16) | values[2]
+            
+            # Convert the 32-bit integer to bytes (little-endian)
+            bytes_value = int_value.to_bytes(4, 'little')
+            
+            # Interpret the bytes as 32-bit float
+            float_value = struct.unpack('f', bytes_value)[0]
+            
+            return float_value
+        except (minimalmodbus.NoResponseError, minimalmodbus.InvalidResponseError, serial.SerialException) as e:
+            last_exception = e
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+            continue
     
-    # Convert the 32-bit integer to bytes (little-endian)
-    bytes_value = int_value.to_bytes(4, 'little')
-    
-    # Interpret the bytes as 32-bit float
-    float_value = struct.unpack('f', bytes_value)[0]
-    
-    return float_value
+    # If all retries failed, raise the last exception
+    raise last_exception
 
 
 # Register constants for Hamilton probes
@@ -134,14 +147,20 @@ class InputModule(AbstractInput):
         self.return_dict = copy.deepcopy(measurements_dict)
 
         try:
+            import time
+            
             if self.is_enabled(0):
                 do_value = read_float_value(self.instrument, DO_REGISTER)
                 self.value_set(0, do_value)
+            
+            # Small delay between readings to reduce bus contention
+            if self.is_enabled(0) and self.is_enabled(1):
+                time.sleep(0.05)
             
             if self.is_enabled(1):
                 temp_value = read_float_value(self.instrument, TEMP_REGISTER)
                 self.value_set(1, temp_value)
         except Exception as exc:
-            self.logger.exception("Failed to read Hamilton DO probe: %s", exc)
+            self.logger.error("Failed to read Hamilton DO probe after retries: %s", exc)
 
         return self.return_dict
