@@ -8,9 +8,9 @@ MYCODO_SERVICE="mycodo"
 
 # Source → Destination mappings
 declare -A SYNC_DIRS=(
-  ["custom_functions"]="${MYCODO_ROOT}/mycodo/custom_functions"
-  ["custom_inputs"]="${MYCODO_ROOT}/mycodo/custom_inputs"
-  ["custom_outputs"]="${MYCODO_ROOT}/mycodo/custom_outputs"
+  ["custom_functions"]="${MYCODO_ROOT}/mycodo/functions/custom_functions"
+  ["custom_inputs"]="${MYCODO_ROOT}/mycodo/inputs/custom_inputs"
+  ["custom_outputs"]="${MYCODO_ROOT}/mycodo/outputs/custom_outputs"
 )
 
 echo "Using Mycodo-custom root: ${MYCODO_CUSTOM_ROOT}"
