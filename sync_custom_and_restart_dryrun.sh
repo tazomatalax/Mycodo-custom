@@ -55,15 +55,18 @@ for SRC in "${!SYNC_DIRS[@]}"; do
   echo "Destination: ${DEST_PATH}"
   echo
 
-  # Use rsync --dry-run to show what would be done
-  # --update: only sync files that are newer in source
-  # No --delete: won't remove any files from destination
-  if [[ -d "$DEST_PATH" ]]; then
-    echo "Files that would be updated or added:"
-    rsync -avin --update "${SRC_PATH}/" "${DEST_PATH}/" || true
+  if [[ "$SRC" == "custom_functions" ]]; then
+    echo "Files that would be copied (flattened structure):"
+    find "${SRC_PATH}" -name "*.py" -type f ! -name "__*" -exec echo "  {}" \;
   else
-    echo "All files would be copied (new destination):"
-    rsync -avin --update "${SRC_PATH}/" "${DEST_PATH}/" || true
+    # Use rsync --dry-run to show what would be done
+    if [[ -d "$DEST_PATH" ]]; then
+      echo "Files that would be updated or added:"
+      rsync -avin --update "${SRC_PATH}/" "${DEST_PATH}/" || true
+    else
+      echo "All files would be copied (new destination):"
+      rsync -avin --update "${SRC_PATH}/" "${DEST_PATH}/" || true
+    fi
   fi
   echo
 done

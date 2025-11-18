@@ -45,10 +45,14 @@ for SRC in "${!SYNC_DIRS[@]}"; do
 
   echo "  -> ${SRC_PATH}  →  ${DEST_PATH}"
 
-  # Only sync new or updated files (based on modification time)
-  # --update: skip files that are newer on the destination
-  # No --delete: keeps existing files in destination
-  rsync -a --update "${SRC_PATH}/" "${DEST_PATH}/"
+  # For custom_functions, flatten the structure - copy only .py files from subdirs
+  if [[ "$SRC" == "custom_functions" ]]; then
+    # Copy all .py files recursively, flattening to destination root
+    find "${SRC_PATH}" -name "*.py" -type f ! -name "__*" -exec cp -u {} "${DEST_PATH}/" \;
+  else
+    # For inputs/outputs, sync normally
+    rsync -a --update "${SRC_PATH}/" "${DEST_PATH}/"
+  fi
 done
 
 echo
