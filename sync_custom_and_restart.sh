@@ -3,7 +3,7 @@ set -euo pipefail
 
 ### CONFIG – adjust if your paths/service name differ
 MYCODO_CUSTOM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MYCODO_ROOT="/var/mycodo-root"
+MYCODO_ROOT="/opt/Mycodo"
 MYCODO_SERVICE="mycodo"
 
 # Source → Destination mappings
