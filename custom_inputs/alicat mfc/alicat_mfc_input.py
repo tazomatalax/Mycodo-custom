@@ -17,6 +17,7 @@ import minimalmodbus
 import serial
 
 from mycodo.inputs.base_input import AbstractInput
+from mycodo.utils.lockfile import LockFile
 
 
 # ===== Alicat Common Functions =====
@@ -145,21 +146,26 @@ class InputModule(AbstractInput):
 
         self.return_dict = copy.deepcopy(measurements_dict)
 
-        try:
-            snapshot = read_mfc_snapshot(self.instrument)
-        except Exception as exc:  # pragma: no cover - requires hardware
-            self.logger.exception("Failed to read Alicat registers: %s", exc)
-            return self.return_dict
+        port = getattr(self.input_dev, "uart_location", "/dev/ttyUSB0")
+        lock_file = f"/var/lock/mycodo_serial_{port.replace('/', '_')}.lock"
+        lf = LockFile()
+        if lf.lock_acquire(lock_file, timeout=5.0):
+            try:
+                snapshot = read_mfc_snapshot(self.instrument)
 
-        if self.is_enabled(0):
-            self.value_set(0, snapshot["volumetric_flow"])
-        if self.is_enabled(1):
-            self.value_set(1, snapshot["mass_flow"])
-        if self.is_enabled(2):
-            self.value_set(2, snapshot["pressure"])
-        if self.is_enabled(3):
-            self.value_set(3, snapshot["temperature"])
-        if self.is_enabled(4):
-            self.value_set(4, snapshot["setpoint"])
+                if self.is_enabled(0):
+                    self.value_set(0, snapshot["volumetric_flow"])
+                if self.is_enabled(1):
+                    self.value_set(1, snapshot["mass_flow"])
+                if self.is_enabled(2):
+                    self.value_set(2, snapshot["pressure"])
+                if self.is_enabled(3):
+                    self.value_set(3, snapshot["temperature"])
+                if self.is_enabled(4):
+                    self.value_set(4, snapshot["setpoint"])
+            except Exception as exc:  # pragma: no cover - requires hardware
+                self.logger.exception("Failed to read Alicat registers: %s", exc)
+            finally:
+                lf.lock_release(lock_file)
 
         return self.return_dict

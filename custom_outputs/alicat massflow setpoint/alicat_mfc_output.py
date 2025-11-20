@@ -17,6 +17,7 @@ import minimalmodbus
 import serial
 
 from mycodo.outputs.base_output import AbstractOutput
+from mycodo.utils.lockfile import LockFile
 
 
 # ===== Alicat Common Functions =====
@@ -194,29 +195,67 @@ class OutputModule(AbstractOutput):
             self.logger.error("Alicat setpoint write skipped: no amount provided")
             return False
 
-        try:
-            echoed = write_setpoint(self.instrument, float(amount))
-            self.logger.info(
-                "Set Alicat flow setpoint to %.3f (device echoed %.3f)", amount, echoed
-            )
-            return True
-        except Exception as exc:  # pragma: no cover - requires hardware
-            self.logger.exception("Failed to write Alicat setpoint: %s", exc)
-            return False
+        lock_file = f"/var/lock/mycodo_serial_{self.uart_device.replace('/', '_')}.lock"
+        lf = LockFile()
+        if lf.lock_acquire(lock_file, timeout=5.0):
+            try:
+                echoed = write_setpoint(self.instrument, float(amount))
+                self.logger.info(
+                    "Set Alicat flow setpoint to %.3f (device echoed %.3f)", amount, echoed
+                )
+                
+                # Store the setpoint value in output_states so is_on() returns it
+                # This makes the output display show "Active, X.X" in the UI
+                self.output_states[0] = echoed
+                
+                return True
+            except Exception as exc:  # pragma: no cover - requires hardware
+                self.logger.exception("Failed to write Alicat setpoint: %s", exc)
+                return False
+            finally:
+                lf.lock_release(lock_file)
+        return False
 
     def is_on(self, channel=None):
         """
-        Required method. Return True if setpoint > 0, False if setpoint is 0.
+        Return the current setpoint value, or False if off.
+        
+        This is what Mycodo calls to determine output state. When this returns
+        a numeric value > 0, the UI shows "Active, X.X". When it returns False
+        or 0, the UI shows "Inactive".
         """
         if self.instrument is None:
+            self.logger.debug("is_on() called but instrument is None")
             return False
         
-        try:
-            snapshot = read_mfc_snapshot(self.instrument)
-            # Consider "on" if setpoint is greater than 0.1 mL/min
-            return snapshot["setpoint"] > 0.1
-        except Exception:
-            return False
+        lock_file = f"/var/lock/mycodo_serial_{self.uart_device.replace('/', '_')}.lock"
+        lf = LockFile()
+        if lf.lock_acquire(lock_file, timeout=5.0):
+            try:
+                # Read the current setpoint from the device
+                snapshot = read_mfc_snapshot(self.instrument)
+                setpoint = snapshot["setpoint"]
+                self.output_states[0] = setpoint
+                
+                self.logger.debug(f"is_on() read setpoint: {setpoint}")
+                
+                # Return the setpoint value if > 0, otherwise False
+                # This makes the UI display show the actual setpoint value
+                if setpoint > 0.01:  # Small threshold for floating point comparison
+                    return setpoint
+                else:
+                    return False
+            except Exception as e:
+                self.logger.error(f"Failed to read setpoint in is_on(): {e}")
+                # Fall back to cached value in output_states
+                if 0 in self.output_states and self.output_states[0]:
+                    cached = self.output_states[0]
+                    self.logger.debug(f"is_on() returning cached value: {cached}")
+                    return cached
+                return False
+            finally:
+                lf.lock_release(lock_file)
+        return False
 
     def is_setup(self):
         """Required method. Return if output is properly initialized."""

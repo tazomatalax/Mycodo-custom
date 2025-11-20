@@ -16,6 +16,7 @@ import minimalmodbus
 import serial
 
 from mycodo.inputs.base_input import AbstractInput
+from mycodo.utils.lockfile import LockFile
 
 
 # ===== Hamilton Common Functions =====
@@ -146,21 +147,27 @@ class InputModule(AbstractInput):
 
         self.return_dict = copy.deepcopy(measurements_dict)
 
-        try:
-            import time
-            
-            if self.is_enabled(0):
-                ph_value = read_float_value(self.instrument, PH_REGISTER)
-                self.value_set(0, ph_value)
-            
-            # Small delay between readings to reduce bus contention
-            if self.is_enabled(0) and self.is_enabled(1):
-                time.sleep(0.05)
-            
-            if self.is_enabled(1):
-                temp_value = read_float_value(self.instrument, TEMP_REGISTER)
-                self.value_set(1, temp_value)
-        except Exception as exc:
-            self.logger.error("Failed to read Hamilton pH probe after retries: %s", exc)
+        port = getattr(self.input_dev, "uart_location", "/dev/ttyUSB0")
+        lock_file = f"/var/lock/mycodo_serial_{port.replace('/', '_')}.lock"
+        lf = LockFile()
+        if lf.lock_acquire(lock_file, timeout=5.0):
+            try:
+                import time
+                
+                if self.is_enabled(0):
+                    ph_value = read_float_value(self.instrument, PH_REGISTER)
+                    self.value_set(0, ph_value)
+                
+                # Small delay between readings to reduce bus contention
+                if self.is_enabled(0) and self.is_enabled(1):
+                    time.sleep(0.05)
+                
+                if self.is_enabled(1):
+                    temp_value = read_float_value(self.instrument, TEMP_REGISTER)
+                    self.value_set(1, temp_value)
+            except Exception as exc:
+                self.logger.error("Failed to read Hamilton pH probe after retries: %s", exc)
+            finally:
+                lf.lock_release(lock_file)
 
         return self.return_dict
