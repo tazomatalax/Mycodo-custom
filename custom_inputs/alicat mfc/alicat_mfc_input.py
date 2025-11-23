@@ -165,6 +165,7 @@ class InputModule(AbstractInput):
                     self.value_set(4, snapshot["setpoint"])
             except Exception as exc:  # pragma: no cover - requires hardware
                 self.logger.exception("Failed to read Alicat registers: %s", exc)
+                self.instrument = None
             finally:
                 lf.lock_release(lock_file)
 

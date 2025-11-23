@@ -167,6 +167,7 @@ class InputModule(AbstractInput):
                     self.value_set(1, temp_value)
             except Exception as exc:
                 self.logger.error("Failed to read Hamilton DO probe after retries: %s", exc)
+                self.instrument = None
             finally:
                 lf.lock_release(lock_file)
 
