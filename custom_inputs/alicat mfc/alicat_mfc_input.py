@@ -31,6 +31,7 @@ def setup_instrument(port: str, slave_address: int, baudrate: int = 19200, timeo
     instrument.serial.timeout = timeout
     instrument.mode = minimalmodbus.MODE_RTU
     instrument.clear_buffers_before_each_transaction = True
+    instrument.close_port_after_each_call = True
     return instrument
 
 
