@@ -91,7 +91,7 @@ FUNCTION_INFORMATION = {
             'default_value': 8.0,
             'required': True,
             'constraints_pass': constraints_pass_positive_value,
-            'name': lazy_gettext('DO Setpoint (mg/L)'),
+            'name': lazy_gettext('DO Setpoint (%)'),
             'phrase': 'Target dissolved oxygen value to maintain'
         },
         {
@@ -257,7 +257,7 @@ class CustomModule(AbstractFunction):
         self.timer_loop = time.time() + self.start_offset
 
         self.logger.info(
-            "DO Control (Air) started: DO Setpoint={:.2f} mg/L, Kp={}, Ki={}, Kd={}, "
+            "DO Control (Air) started: DO Setpoint={:.2f} %, Kp={}, Ki={}, Kd={}, "
             "Flow Limits: {}-{} mL/min, Period={}s, Direction={}".format(
                 self.setpoint, self.kp, self.ki, self.kd,
                 self.min_flow, self.max_flow, self.period, self.direction))
@@ -311,7 +311,7 @@ class CustomModule(AbstractFunction):
         d = self.pid_controller.D_value if self.pid_controller.D_value else 0
 
         self.logger.debug(
-            f"DO Control: Current={current_do:.3f} mg/L, Setpoint={self.setpoint:.3f} mg/L, "
+            f"DO Control: Current={current_do:.3f} %, Setpoint={self.setpoint:.3f} %, "
             f"Error={current_do - self.setpoint:.3f}, Air Flow={air_flow:.2f} mL/min, "
             f"PID(P={p:.2f}, I={i:.2f}, D={d:.2f})")
 

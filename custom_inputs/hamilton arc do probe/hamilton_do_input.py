@@ -71,7 +71,7 @@ TEMP_REGISTER = 2409
 
 
 measurements_dict = {
-    0: {"measurement": "dissolved_oxygen", "unit": "mg_L"},
+    0: {"measurement": "dissolved_oxygen", "unit": "percent"},
     1: {"measurement": "temperature", "unit": "C"},
 }
 
