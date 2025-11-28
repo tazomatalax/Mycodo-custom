@@ -14,20 +14,53 @@ from mycodo.functions.base_function import AbstractFunction
 from mycodo.mycodo_client import DaemonControl
 from mycodo.utils.constraints_pass import constraints_pass_positive_value
 from mycodo.utils.database import db_retrieve_table_daemon
+from mycodo.utils.influx import write_influxdb_value
 from mycodo.utils.pid_controller_default import PIDControl
+
+# Measurement channels for InfluxDB logging
+measurements_dict = {
+    0: {
+        'measurement': 'volume_flow_rate',
+        'unit': 'ml_per_minute',
+        'name': 'CO2 Flow Rate'
+    },
+    1: {
+        'measurement': 'pid_p_value',
+        'unit': 'unitless',
+        'name': 'PID P Value'
+    },
+    2: {
+        'measurement': 'pid_i_value',
+        'unit': 'unitless',
+        'name': 'PID I Value'
+    },
+    3: {
+        'measurement': 'pid_d_value',
+        'unit': 'unitless',
+        'name': 'PID D Value'
+    },
+    4: {
+        'measurement': 'setpoint',
+        'unit': 'pH',
+        'name': 'pH Setpoint'
+    }
+}
 
 FUNCTION_INFORMATION = {
     'function_name_unique': 'ph_control_co2_mfc',
     'function_name': 'pH Control (CO2 MFC)',
     'function_name_short': 'pH Control CO2',
+    'measurements_dict': measurements_dict,
 
     'message': 'PID controller for maintaining pH setpoint by regulating CO2 flow through a mass flow controller. '
                'The controller lowers pH by increasing CO2 flow. Includes configurable min/max flow limits to '
                'prevent over-dosing and ensure safe operation. Select a pH input, a mass flow controller output, '
-               'and configure PID gains and flow limits.',
+               'and configure PID gains and flow limits. '
+               'Logs CO2 flow rate and PID values to InfluxDB for graphing.',
 
     'options_enabled': [
-        'custom_options'
+        'custom_options',
+        'function_status'
     ],
     'options_disabled': [
         'measurements_select',
@@ -309,6 +342,49 @@ class CustomModule(AbstractFunction):
         i = self.pid_controller.I_value if self.pid_controller.I_value else 0
         d = self.pid_controller.D_value if self.pid_controller.D_value else 0
 
+        # Store current values for status display
+        self.current_ph = current_ph
+        self.current_flow = co2_flow
+        self.current_p = p
+        self.current_i = i
+        self.current_d = d
+
+        # Log to InfluxDB for graphing
+        write_influxdb_value(
+            self.unique_id,
+            'ml_per_minute',
+            value=co2_flow,
+            measure='volume_flow_rate',
+            channel=0)
+        
+        write_influxdb_value(
+            self.unique_id,
+            'unitless',
+            value=p,
+            measure='pid_p_value',
+            channel=1)
+        
+        write_influxdb_value(
+            self.unique_id,
+            'unitless',
+            value=i,
+            measure='pid_i_value',
+            channel=2)
+        
+        write_influxdb_value(
+            self.unique_id,
+            'unitless',
+            value=d,
+            measure='pid_d_value',
+            channel=3)
+        
+        write_influxdb_value(
+            self.unique_id,
+            'pH',
+            value=self.setpoint,
+            measure='setpoint',
+            channel=4)
+
         self.logger.debug(
             f"pH Control: Current={current_ph:.3f}, Setpoint={self.setpoint:.3f}, "
             f"Error={current_ph - self.setpoint:.3f}, CO2 Flow={co2_flow:.2f} mL/min, "
@@ -323,3 +399,33 @@ class CustomModule(AbstractFunction):
                 output_type='value',
                 amount=0.0,
                 output_channel=self.output_channel)
+
+    def function_status(self):
+        """Return status information for the UI"""
+        current_ph = getattr(self, 'current_ph', None)
+        current_flow = getattr(self, 'current_flow', None)
+        current_p = getattr(self, 'current_p', 0)
+        current_i = getattr(self, 'current_i', 0)
+        current_d = getattr(self, 'current_d', 0)
+        
+        if current_ph is not None and current_flow is not None:
+            status_str = (
+                f"<strong>pH Control Status</strong>"
+                f"<br>Current pH: {current_ph:.2f}"
+                f"<br>Setpoint: {self.setpoint:.2f}"
+                f"<br>Error: {current_ph - self.setpoint:.3f}"
+                f"<br>"
+                f"<br><strong>CO2 Flow</strong>"
+                f"<br>Current: {current_flow:.1f} mL/min"
+                f"<br>Limits: {self.min_flow:.1f} - {self.max_flow:.1f} mL/min"
+                f"<br>"
+                f"<br><strong>PID Values</strong>"
+                f"<br>P: {current_p:.3f}"
+                f"<br>I: {current_i:.3f}"
+                f"<br>D: {current_d:.3f}"
+                f"<br>Gains: Kp={self.kp}, Ki={self.ki}, Kd={self.kd}"
+            )
+        else:
+            status_str = "<strong>pH Control Status</strong><br>Initializing..."
+        
+        return {'string_status': status_str, 'error': []}

@@ -14,20 +14,53 @@ from mycodo.functions.base_function import AbstractFunction
 from mycodo.mycodo_client import DaemonControl
 from mycodo.utils.constraints_pass import constraints_pass_positive_value
 from mycodo.utils.database import db_retrieve_table_daemon
+from mycodo.utils.influx import write_influxdb_value
 from mycodo.utils.pid_controller_default import PIDControl
+
+# Measurement channels for InfluxDB logging
+measurements_dict = {
+    0: {
+        'measurement': 'volume_flow_rate',
+        'unit': 'ml_per_minute',
+        'name': 'Air Flow Rate'
+    },
+    1: {
+        'measurement': 'pid_p_value',
+        'unit': 'unitless',
+        'name': 'PID P Value'
+    },
+    2: {
+        'measurement': 'pid_i_value',
+        'unit': 'unitless',
+        'name': 'PID I Value'
+    },
+    3: {
+        'measurement': 'pid_d_value',
+        'unit': 'unitless',
+        'name': 'PID D Value'
+    },
+    4: {
+        'measurement': 'setpoint',
+        'unit': 'percent',
+        'name': 'DO Setpoint'
+    }
+}
 
 FUNCTION_INFORMATION = {
     'function_name_unique': 'do_control_air_mfc',
     'function_name': 'DO Control (Air MFC)',
     'function_name_short': 'DO Control Air',
+    'measurements_dict': measurements_dict,
 
     'message': 'PID controller for maintaining dissolved oxygen (DO) setpoint by regulating air flow through a '
                'mass flow controller. The controller raises DO by increasing air flow. Includes configurable '
                'min/max flow limits to prevent over-aeration and ensure safe operation. Select a DO input, '
-               'a mass flow controller output, and configure PID gains and flow limits.',
+               'a mass flow controller output, and configure PID gains and flow limits. '
+               'Logs air flow rate and PID values to InfluxDB for graphing.',
 
     'options_enabled': [
-        'custom_options'
+        'custom_options',
+        'function_status'
     ],
     'options_disabled': [
         'measurements_select',
@@ -310,6 +343,49 @@ class CustomModule(AbstractFunction):
         i = self.pid_controller.I_value if self.pid_controller.I_value else 0
         d = self.pid_controller.D_value if self.pid_controller.D_value else 0
 
+        # Store current values for status display
+        self.current_do = current_do
+        self.current_flow = air_flow
+        self.current_p = p
+        self.current_i = i
+        self.current_d = d
+
+        # Log to InfluxDB for graphing
+        write_influxdb_value(
+            self.unique_id,
+            'ml_per_minute',
+            value=air_flow,
+            measure='volume_flow_rate',
+            channel=0)
+        
+        write_influxdb_value(
+            self.unique_id,
+            'unitless',
+            value=p,
+            measure='pid_p_value',
+            channel=1)
+        
+        write_influxdb_value(
+            self.unique_id,
+            'unitless',
+            value=i,
+            measure='pid_i_value',
+            channel=2)
+        
+        write_influxdb_value(
+            self.unique_id,
+            'unitless',
+            value=d,
+            measure='pid_d_value',
+            channel=3)
+        
+        write_influxdb_value(
+            self.unique_id,
+            'percent',
+            value=self.setpoint,
+            measure='setpoint',
+            channel=4)
+
         self.logger.debug(
             f"DO Control: Current={current_do:.3f} %, Setpoint={self.setpoint:.3f} %, "
             f"Error={current_do - self.setpoint:.3f}, Air Flow={air_flow:.2f} mL/min, "
@@ -324,3 +400,33 @@ class CustomModule(AbstractFunction):
                 output_type='value',
                 amount=0.0,
                 output_channel=self.output_channel)
+
+    def function_status(self):
+        """Return status information for the UI"""
+        current_do = getattr(self, 'current_do', None)
+        current_flow = getattr(self, 'current_flow', None)
+        current_p = getattr(self, 'current_p', 0)
+        current_i = getattr(self, 'current_i', 0)
+        current_d = getattr(self, 'current_d', 0)
+        
+        if current_do is not None and current_flow is not None:
+            status_str = (
+                f"<strong>DO Control Status</strong>"
+                f"<br>Current DO: {current_do:.2f} %"
+                f"<br>Setpoint: {self.setpoint:.2f} %"
+                f"<br>Error: {current_do - self.setpoint:.3f}"
+                f"<br>"
+                f"<br><strong>Air Flow</strong>"
+                f"<br>Current: {current_flow:.1f} mL/min"
+                f"<br>Limits: {self.min_flow:.1f} - {self.max_flow:.1f} mL/min"
+                f"<br>"
+                f"<br><strong>PID Values</strong>"
+                f"<br>P: {current_p:.3f}"
+                f"<br>I: {current_i:.3f}"
+                f"<br>D: {current_d:.3f}"
+                f"<br>Gains: Kp={self.kp}, Ki={self.ki}, Kd={self.kd}"
+            )
+        else:
+            status_str = "<strong>DO Control Status</strong><br>Initializing..."
+        
+        return {'string_status': status_str, 'error': []}

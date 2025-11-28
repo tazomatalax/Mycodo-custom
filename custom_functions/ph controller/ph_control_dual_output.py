@@ -12,22 +12,51 @@ import time
 from flask_babel import lazy_gettext
 
 from mycodo.databases.models import CustomController
-from mycodo.databases.models import SMTP
 from mycodo.functions.base_function import AbstractFunction
 from mycodo.mycodo_client import DaemonControl
 from mycodo.utils.constraints_pass import constraints_pass_positive_value
 from mycodo.utils.database import db_retrieve_table_daemon
-from mycodo.utils.send_data import send_email
+from mycodo.utils.influx import write_influxdb_value
+
+# Measurement channels for InfluxDB logging
+measurements_dict = {
+    0: {
+        'measurement': 'volume_flow_rate',
+        'unit': 'ml_per_minute',
+        'name': 'CO2 Flow Rate'
+    },
+    1: {
+        'measurement': 'volume',
+        'unit': 'ml',
+        'name': 'Base Volume Dosed'
+    },
+    2: {
+        'measurement': 'duration',
+        'unit': 's',
+        'name': 'Base Duration Dosed'
+    },
+    3: {
+        'measurement': 'volume',
+        'unit': 'ml',
+        'name': 'Cumulative Base Volume'
+    },
+    4: {
+        'measurement': 'duration',
+        'unit': 's',
+        'name': 'Cumulative CO2 Flow Time'
+    }
+}
 
 FUNCTION_INFORMATION = {
     'function_name_unique': 'ph_control_dual_output',
     'function_name': 'pH Control (CO2 MFC + Base Pump)',
     'function_name_short': 'pH Control Dual',
+    'measurements_dict': measurements_dict,
 
     'message': 'Regulate pH using a CO2 mass flow controller to lower pH and a base pump to raise pH. '
-               'When pH is too high, CO2 flow increases. When pH is too low, base solution is dosed. '
-               'Includes tracking of total CO2 flow and base volume dispensed. Can send email alerts '
-               'if pH goes outside danger range.',
+               'When pH is above setpoint + hysteresis, CO2 flow increases. When pH is below setpoint - hysteresis, '
+               'base solution is dosed. Includes tracking of total CO2 flow and base volume dispensed. '
+               'Logs CO2 flow rate and base dosing events to InfluxDB for graphing.',
 
     'options_enabled': [
         'custom_options',
@@ -60,19 +89,6 @@ FUNCTION_INFORMATION = {
             'type': 'button',
             'wait_for_return': True,
             'name': 'Reset Base Volume Total'
-        },
-        {
-            'type': 'new_line'
-        },
-        {
-            'type': 'message',
-            'default_value': 'Reset email notification timer.'
-        },
-        {
-            'id': 'reset_email_timer',
-            'type': 'button',
-            'wait_for_return': True,
-            'name': 'Reset Email Timer'
         }
     ],
 
@@ -159,7 +175,6 @@ FUNCTION_INFORMATION = {
             'type': 'float',
             'default_value': 10.0,
             'required': True,
-            'constraints_pass': constraints_pass_positive_value,
             'name': 'CO2 Maintain Flow Rate (mL/min)',
             'phrase': 'CO2 flow when maintaining pH (can be 0)'
         },
@@ -226,54 +241,6 @@ FUNCTION_INFORMATION = {
             'constraints_pass': constraints_pass_positive_value,
             'name': 'pH Hysteresis',
             'phrase': 'Control band (+/-) around setpoint'
-        },
-        {
-            'type': 'new_line'
-        },
-        {
-            'type': 'message',
-            'default_value': '<strong>pH Danger Range (for email alerts)</strong>'
-        },
-        {
-            'id': 'danger_range_ph_high',
-            'type': 'float',
-            'default_value': 8.5,
-            'required': True,
-            'constraints_pass': constraints_pass_positive_value,
-            'name': 'pH Danger High',
-            'phrase': 'Critical high pH value for alerts'
-        },
-        {
-            'id': 'danger_range_ph_low',
-            'type': 'float',
-            'default_value': 5.5,
-            'required': True,
-            'constraints_pass': constraints_pass_positive_value,
-            'name': 'pH Danger Low',
-            'phrase': 'Critical low pH value for alerts'
-        },
-        {
-            'type': 'new_line'
-        },
-        {
-            'type': 'message',
-            'default_value': '<strong>Email Notifications (Optional)</strong>'
-        },
-        {
-            'id': 'email_notification',
-            'type': 'text',
-            'default_value': '',
-            'name': 'Notification Email',
-            'phrase': 'Email address for alerts (blank to disable)'
-        },
-        {
-            'id': 'email_timer_duration_hours',
-            'type': 'float',
-            'default_value': 12.0,
-            'required': True,
-            'constraints_pass': constraints_pass_positive_value,
-            'name': 'Email Timer Duration (Hours)',
-            'phrase': 'Minimum time between notification emails'
         }
     ]
 }
@@ -315,14 +282,7 @@ class CustomModule(AbstractFunction):
         # Setpoints
         self.setpoint_ph = None
         self.hysteresis_ph = None
-        self.danger_range_ph_high = None
-        self.danger_range_ph_low = None
         self.range_ph = None
-
-        # Email
-        self.email_notification = None
-        self.email_timer_duration_hours = None
-        self.email_timer = 0
 
         # Totals tracking
         self.total_co2_flow_time = None
@@ -373,14 +333,9 @@ class CustomModule(AbstractFunction):
         else:
             self.total_base_ml = self.get_custom_option("total_base_ml")
 
-        # Handle multiple email addresses
-        if self.email_notification and "," in self.email_notification:
-            self.email_notification = self.email_notification.split(",")
-
         self.logger.info(
             f"pH Dual Control started: Setpoint={self.setpoint_ph:.2f}, "
             f"Range={self.range_ph[0]:.2f}-{self.range_ph[1]:.2f}, "
-            f"Danger Range={self.danger_range_ph_low:.2f}-{self.danger_range_ph_high:.2f}, "
             f"CO2 Flow: High={self.co2_flow_high} mL/min, Maintain={self.co2_flow_maintain} mL/min, "
             f"Base Dose={self.base_dose_amount} {self.output_base_type}")
 
@@ -401,66 +356,32 @@ class CustomModule(AbstractFunction):
         if not last_measurement_ph or last_measurement_ph[1] is None:
             self.logger.error("No pH measurement available. Stopping CO2 flow for safety.")
             self.set_co2_flow(0, "SAFETY_STOP")
-            
-            if self.email_notification:
-                if self.email_timer < time.time():
-                    self.email_timer = time.time() + (self.email_timer_duration_hours * 60 * 60)
-                    self.send_email("Warning: No pH measurement available!")
             return
 
         current_ph = last_measurement_ph[1]
 
-        # Priority 1: Check if pH is in DANGER range
-        if current_ph < self.danger_range_ph_low:
-            # Dangerously low pH - dose base immediately
-            message = (f"DANGER: pH critically low at {current_ph:.2f} "
-                      f"(should be > {self.danger_range_ph_low:.2f}). "
-                      f"Dosing {self.base_dose_amount} {self.output_base_type} base.")
-            self.logger.warning(message)
-            self.dose_base()
-            
-            if self.email_notification:
-                if self.email_timer < time.time():
-                    self.email_timer = time.time() + (self.email_timer_duration_hours * 60 * 60)
-                    self.send_email(message)
-            return
-
-        elif current_ph > self.danger_range_ph_high:
-            # Dangerously high pH - max CO2 flow immediately
-            message = (f"DANGER: pH critically high at {current_ph:.2f} "
-                      f"(should be < {self.danger_range_ph_high:.2f}). "
-                      f"Setting CO2 to maximum flow {self.co2_flow_high} mL/min.")
-            self.logger.warning(message)
-            self.set_co2_flow(self.co2_flow_high, "DANGER_HIGH")
-            
-            if self.email_notification:
-                if self.email_timer < time.time():
-                    self.email_timer = time.time() + (self.email_timer_duration_hours * 60 * 60)
-                    self.send_email(message)
-            return
-
-        # Priority 2: Normal regulation within hysteresis range
+        # Control logic based on pH range
         if current_ph < self.range_ph[0]:
-            # pH too low - dose base to raise it
+            # pH too low - dose base to raise it, stop CO2
             self.logger.info(
                 f"pH {current_ph:.2f} < {self.range_ph[0]:.2f}. "
                 f"Dosing {self.base_dose_amount} {self.output_base_type} base.")
             self.dose_base()
-            self.set_co2_flow(0, "pH_LOW")  # Stop CO2 while raising pH
+            self.set_co2_flow(0, "DOSING_BASE")
 
         elif current_ph > self.range_ph[1]:
             # pH too high - increase CO2 flow to lower it
             self.logger.info(
                 f"pH {current_ph:.2f} > {self.range_ph[1]:.2f}. "
                 f"Setting CO2 to {self.co2_flow_high} mL/min.")
-            self.set_co2_flow(self.co2_flow_high, "pH_HIGH")
+            self.set_co2_flow(self.co2_flow_high, "LOWERING_pH")
 
         else:
             # pH in range - maintain with low CO2 flow
             self.logger.debug(
                 f"pH {current_ph:.2f} in range {self.range_ph[0]:.2f}-{self.range_ph[1]:.2f}. "
                 f"Maintaining with {self.co2_flow_maintain} mL/min CO2.")
-            self.set_co2_flow(self.co2_flow_maintain, "pH_OK")
+            self.set_co2_flow(self.co2_flow_maintain, "IN_RANGE")
 
     def set_co2_flow(self, flow_rate, state):
         """Set CO2 MFC flow rate"""
@@ -474,6 +395,22 @@ class CustomModule(AbstractFunction):
         self.total_co2_flow_time = self.set_custom_option(
             "total_co2_flow_time",
             self.get_custom_option("total_co2_flow_time") + self.period)
+        
+        # Log CO2 flow rate to InfluxDB
+        write_influxdb_value(
+            self.unique_id,
+            'ml_per_minute',
+            value=flow_rate,
+            measure='volume_flow_rate',
+            channel=0)
+        
+        # Log cumulative CO2 flow time
+        write_influxdb_value(
+            self.unique_id,
+            's',
+            value=self.total_co2_flow_time,
+            measure='duration',
+            channel=4)
         
         if state != self.current_state:
             self.current_state = state
@@ -490,25 +427,39 @@ class CustomModule(AbstractFunction):
                     'output_channel': self.output_base_raise_channel})
         output_on_off.start()
 
-        # Track totals
+        # Track totals and log to InfluxDB
         if base_type == 'sec':
             self.total_base_sec = self.set_custom_option(
                 "total_base_sec",
                 self.get_custom_option("total_base_sec") + self.base_dose_amount)
+            
+            # Log base duration dosed
+            write_influxdb_value(
+                self.unique_id,
+                's',
+                value=self.base_dose_amount,
+                measure='duration',
+                channel=2)
         else:
             self.total_base_ml = self.set_custom_option(
                 "total_base_ml",
                 self.get_custom_option("total_base_ml") + self.base_dose_amount)
-
-    def send_email(self, message):
-        """Send email notification"""
-        try:
-            smtp = db_retrieve_table_daemon(SMTP, entry='first')
-            send_email(smtp.host, smtp.protocol, smtp.port,
-                      smtp.user, smtp.passw, smtp.email_from,
-                      self.email_notification, message)
-        except Exception as e:
-            self.logger.error(f"Failed to send email: {e}")
+            
+            # Log base volume dosed
+            write_influxdb_value(
+                self.unique_id,
+                'ml',
+                value=self.base_dose_amount,
+                measure='volume',
+                channel=1)
+            
+            # Log cumulative base volume
+            write_influxdb_value(
+                self.unique_id,
+                'ml',
+                value=self.total_base_ml,
+                measure='volume',
+                channel=3)
 
     def stop_function(self):
         """Called when function is deactivated"""
@@ -535,30 +486,23 @@ class CustomModule(AbstractFunction):
         self.total_base_ml = self.set_custom_option("total_base_ml", 0)
         return "Base dose totals reset successfully"
 
-    def reset_email_timer(self, args_dict):
-        """Reset email notification timer"""
-        self.email_timer = 0
-        return "Email timer reset successfully"
-
     def function_status(self):
         """Return status information for UI"""
         return_str = {
             'string_status': 
-                f"<strong>pH Regulation</strong>"
-                f"<br>Target: {self.setpoint_ph:.2f} ± {self.hysteresis_ph:.2f} "
-                f"(Range: {self.range_ph[0]:.2f} - {self.range_ph[1]:.2f})"
-                f"<br>Danger Range: {self.danger_range_ph_low:.2f} - {self.danger_range_ph_high:.2f}"
+                f"<strong>pH Control</strong>"
+                f"<br>Setpoint: {self.setpoint_ph:.2f} ± {self.hysteresis_ph:.2f}"
+                f"<br>Range: {self.range_ph[0]:.2f} - {self.range_ph[1]:.2f}"
+                f"<br>State: {self.current_state if self.current_state else 'Initializing'}"
                 f"<br>"
                 f"<br><strong>CO2 MFC (Lower pH)</strong>"
                 f"<br>High Flow: {self.co2_flow_high} mL/min"
                 f"<br>Maintain Flow: {self.co2_flow_maintain} mL/min"
-                f"<br>Total Flow Time: {self.total_co2_flow_time:.1f} seconds"
+                f"<br>Total Flow Time: {self.total_co2_flow_time:.0f} sec ({self.total_co2_flow_time/3600:.1f} hrs)"
                 f"<br>"
                 f"<br><strong>Base Pump (Raise pH)</strong>"
-                f"<br>Dose Amount: {self.base_dose_amount} {self.output_base_type}"
-                f"<br>Total Dispensed: {self.total_base_sec:.2f} sec, {self.total_base_ml:.2f} ml"
-                f"<br>"
-                f"<br>State: {self.current_state if self.current_state else 'Initializing'}",
+                f"<br>Dose Amount: {self.base_dose_amount} {self.output_base_type.replace('_', ' ')}"
+                f"<br>Total Dispensed: {self.total_base_ml:.1f} ml / {self.total_base_sec:.1f} sec",
             'error': []
         }
         return return_str
