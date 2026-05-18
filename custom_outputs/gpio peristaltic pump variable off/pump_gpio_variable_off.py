@@ -2,9 +2,11 @@
 #
 # pump_gpio_variable_off.py - Peristaltic pump output with fixed ON time and variable OFF time.
 #
-# Unlike the built-in pump_gpio.py which constrains cycles to a 60-second window,
-# this output uses a user-defined fixed ON pulse duration and calculates the OFF
-# duration freely, allowing very low flow rates (e.g. a 10-second pulse every 20 minutes).
+# Three flow rate modes:
+#   1. Fastest Flow Rate   - runs pump continuously at 100% duty cycle
+#   2. Specify Flow Rate   - user sets desired ml/min; off time is calculated automatically
+#   3. Simple Interval     - user sets on_seconds and off_seconds directly;
+#                            effective flow rate is calculated and logged automatically
 #
 import copy
 import datetime
@@ -56,12 +58,13 @@ OUTPUT_INFORMATION = {
     'output_types': ['volume', 'on_off'],
 
     'message': (
-        "This output turns a GPIO pin HIGH and LOW to control a peristaltic pump using a fixed ON pulse "
-        "duration and a calculated variable OFF duration. Unlike the standard peristaltic pump output, "
-        "the cycle period is not constrained to 60 seconds, allowing very low flow rates such as a "
-        "10-second pulse every 20 minutes. Set 'On Pulse Duration (Seconds)' to the fixed length of "
-        "each pump pulse, then calibrate 'Fastest Rate (ml/min)' by running the pump continuously for "
-        "60 seconds and measuring the dispensed volume."
+        "Controls a peristaltic pump via GPIO using fixed ON pulses with a variable OFF gap. "
+        "Three modes: (1) Fastest Flow Rate — runs continuously; "
+        "(2) Specify Flow Rate — enter a desired ml/min and the off time is calculated; "
+        "(3) Simple Interval — directly set the ON and OFF durations and the effective flow rate "
+        "is calculated and logged for you. "
+        "Calibrate by running the pump continuously for 60 seconds and entering the dispensed volume "
+        "as 'Fastest Rate (ml/min)'."
     ),
 
     'options_enabled': [
@@ -78,11 +81,16 @@ OUTPUT_INFORMATION = {
     'interfaces': ['GPIO'],
 
     'custom_options_message': (
-        "Calibration: purge the fluid line, then run the pump continuously for 60 seconds and measure "
-        "the dispensed volume in ml. Enter that value as 'Fastest Rate (ml/min)'. "
-        "Set 'On Pulse Duration (Seconds)' to the fixed pulse width you want (e.g. 10 seconds). "
-        "The output will then calculate the required off time between pulses to achieve the desired flow rate. "
-        "Very low flow rates are supported since the off time is unbounded."
+        "CALIBRATION: Purge the fluid line, run the pump continuously for 60 seconds, measure the "
+        "dispensed volume in ml, and enter that value as 'Fastest Rate (ml/min)'. "
+        "\n\n"
+        "MODE — Specify Flow Rate: Set 'On Pulse Duration' (e.g. 10 s) and 'Desired Flow Rate'. "
+        "The off time is calculated automatically. "
+        "Effective flow rate = Fastest Rate × (on / (on + off)). "
+        "\n\n"
+        "MODE — Simple Interval: Set 'On Pulse Duration' and 'Off Interval Duration' directly. "
+        "The effective flow rate and cycle period will be calculated and logged each time the pump runs. "
+        "Formula: Flow Rate (ml/min) = Fastest Rate × on_s / (on_s + off_s)."
     ),
 
     'custom_channel_options': [
@@ -121,9 +129,10 @@ OUTPUT_INFORMATION = {
             'constraints_pass': constraints_pass_positive_value,
             'name': 'On Pulse Duration (Seconds)',
             'phrase': (
-                'The fixed duration the pump turns on for each pulse. '
-                'The off time between pulses is calculated automatically from the desired flow rate. '
-                'There is no minimum off-time constraint, so very low flow rates are achievable.'
+                'How long the pump runs for each pulse. '
+                'Used in all modes. '
+                'In Specify Flow Rate mode the off time is calculated from this and the desired flow rate. '
+                'In Simple Interval mode both on and off times are set directly.'
             )
         },
         {
@@ -132,18 +141,35 @@ OUTPUT_INFORMATION = {
             'default_value': 'fastest_flow_rate',
             'options_select': [
                 ('fastest_flow_rate', 'Fastest Flow Rate'),
-                ('specify_flow_rate', 'Specify Flow Rate')
+                ('specify_flow_rate', 'Specify Flow Rate'),
+                ('simple_interval', 'Simple Interval (set on + off directly)')
             ],
             'name': 'Flow Rate Method',
-            'phrase': 'The flow rate to use when pumping a volume'
+            'phrase': (
+                'Fastest Flow Rate: runs continuously at 100% duty cycle. '
+                'Specify Flow Rate: enter ml/min and off time is calculated. '
+                'Simple Interval: set on and off durations directly; effective flow rate is calculated for you.'
+            )
         },
         {
             'id': 'flow_rate',
             'type': 'float',
             'default_value': 10.0,
             'constraints_pass': constraints_pass_positive_value,
-            'name': "{} ({})".format(lazy_gettext('Desired Flow Rate'), lazy_gettext('ml/min')),
-            'phrase': 'Desired flow rate in ml/minute when Specify Flow Rate is set'
+            'name': "{} ({}) — Specify Flow Rate mode".format(lazy_gettext('Desired Flow Rate'), lazy_gettext('ml/min')),
+            'phrase': 'Desired flow rate in ml/min. Used only in Specify Flow Rate mode. Off time is calculated automatically.'
+        },
+        {
+            'id': 'off_interval_seconds',
+            'type': 'float',
+            'default_value': 1200.0,
+            'constraints_pass': constraints_pass_positive_value,
+            'name': 'Off Interval Duration (Seconds) — Simple Interval mode',
+            'phrase': (
+                'How long the pump stays off between pulses. Used only in Simple Interval mode. '
+                'Effective flow rate = Fastest Rate × on_s / (on_s + off_s). '
+                'Example: on=10 s, off=1200 s, fastest=20.7 ml/min → 0.171 ml/min, cycle every 20.2 min.'
+            )
         },
         {
             'id': 'amps',
@@ -217,42 +243,32 @@ class OutputModule(AbstractOutput):
         self.logger.debug("Output turned off")
         self.record_dispersal(amount, total_dispense_seconds, total_dispense_seconds, timestamp=timestamp_start)
 
-    def dispense_volume_rate(self, amount, dispense_rate):
+    def dispense_volume_rate(self, amount, dispense_rate, repeat_seconds_on, repeat_seconds_off):
         """
         Dispense a volume at a specific flow rate using fixed-ON / variable-OFF pulsing.
 
-        The ON pulse duration is fixed by the user ('on_pulse_seconds'). The OFF duration
-        between pulses is calculated from the duty cycle, with no 60-second window constraint.
-        This allows arbitrarily low flow rates.
-
-        Cycle math:
-            duty_cycle         = dispense_rate / fastest_rate
-            repeat_seconds_on  = on_pulse_seconds                        (fixed)
-            repeat_seconds_off = on_pulse_seconds * (1 - duty_cycle) / duty_cycle  (variable)
+        repeat_seconds_on and repeat_seconds_off are pre-calculated by the caller so this
+        method works for both 'Specify Flow Rate' and 'Simple Interval' modes.
         """
         total_dispense_seconds = amount / dispense_rate * 60
         self.logger.debug("Total duration to run: {0:.1f} seconds".format(total_dispense_seconds))
 
-        duty_cycle = dispense_rate / self.options_channels['fastest_dispense_rate_ml_min'][0]
-        self.logger.debug("Duty Cycle: {0:.2f} %".format(duty_cycle * 100))
-
+        duty_cycle = repeat_seconds_on / (repeat_seconds_on + repeat_seconds_off)
         total_seconds_on = total_dispense_seconds * duty_cycle
-        self.logger.debug("Total seconds on: {0:.1f}".format(total_seconds_on))
-
         total_seconds_off = total_dispense_seconds - total_seconds_on
+
+        self.logger.debug("Duty Cycle: {0:.2f} %".format(duty_cycle * 100))
+        self.logger.debug("Total seconds on: {0:.1f}".format(total_seconds_on))
         self.logger.debug("Total seconds off: {0:.1f}".format(total_seconds_off))
-
-        repeat_seconds_on = self.options_channels['on_pulse_seconds'][0]
-        # Variable off time — no 60-second window constraint
-        repeat_seconds_off = repeat_seconds_on * (1.0 - duty_cycle) / duty_cycle
-
         self.logger.debug(
             "Pulse cycle: on {on:.2f} s, off {off:.1f} s  "
-            "(cycle period {period:.1f} s = {period_min:.2f} min)".format(
+            "(period {period:.1f} s = {period_min:.2f} min)  "
+            "Effective flow rate: {rate:.4f} ml/min".format(
                 on=repeat_seconds_on,
                 off=repeat_seconds_off,
                 period=repeat_seconds_on + repeat_seconds_off,
-                period_min=(repeat_seconds_on + repeat_seconds_off) / 60.0))
+                period_min=(repeat_seconds_on + repeat_seconds_off) / 60.0,
+                rate=dispense_rate))
 
         self.currently_dispensing = True
         timer_dispense = time.time() + total_dispense_seconds
@@ -323,17 +339,8 @@ class OutputModule(AbstractOutput):
 
             elif self.options_channels['flow_mode'][0] == 'specify_flow_rate':
                 fastest = self.options_channels['fastest_dispense_rate_ml_min'][0]
-                on_pulse = self.options_channels['on_pulse_seconds'][0]
-
-                # The slowest achievable rate occurs when duty_cycle approaches 0.
-                # In practice, enforce a minimum OFF time of 0.1 s to avoid GPIO thrashing.
-                min_off_seconds = 0.1
-                slowest_rate_ml_min = fastest * on_pulse / (on_pulse + min_off_seconds)
-                # Note: slowest_rate approaches 0 with no hard floor — the user-requested rate
-                # is honoured as long as it is > 0. We only warn, not clamp, at the low end.
 
                 requested = self.options_channels['flow_rate'][0]
-
                 if requested > fastest:
                     self.logger.debug(
                         "Instructed to dispense {ir:.3f} ml/min, "
@@ -343,12 +350,46 @@ class OutputModule(AbstractOutput):
                 else:
                     dispense_rate = requested
 
+                # Calculate off time from duty cycle (no 60-second window constraint)
+                duty_cycle = dispense_rate / fastest
+                on_s = self.options_channels['on_pulse_seconds'][0]
+                off_s = on_s * (1.0 - duty_cycle) / duty_cycle
+
+                self.logger.debug(
+                    "Specify Flow Rate mode: {rate:.4f} ml/min → on {on:.2f} s / off {off:.1f} s "
+                    "(period {period:.1f} s = {period_min:.2f} min)".format(
+                        rate=dispense_rate, on=on_s, off=off_s,
+                        period=on_s + off_s, period_min=(on_s + off_s) / 60.0))
                 self.logger.debug("Turning pump on to dispense {ml:.1f} ml at {rate:.4f} ml/min.".format(
                     ml=amount, rate=dispense_rate))
 
                 write_db = threading.Thread(
                     target=self.dispense_volume_rate,
-                    args=(amount, dispense_rate,))
+                    args=(amount, dispense_rate, on_s, off_s))
+                write_db.start()
+                return
+
+            elif self.options_channels['flow_mode'][0] == 'simple_interval':
+                fastest = self.options_channels['fastest_dispense_rate_ml_min'][0]
+                on_s = self.options_channels['on_pulse_seconds'][0]
+                off_s = self.options_channels['off_interval_seconds'][0]
+
+                # Calculate effective flow rate from the intervals
+                effective_rate = fastest * on_s / (on_s + off_s)
+
+                self.logger.info(
+                    "Simple Interval mode: on {on:.2f} s / off {off:.1f} s "
+                    "(period {period:.1f} s = {period_min:.2f} min) → "
+                    "Effective flow rate: {rate:.4f} ml/min".format(
+                        on=on_s, off=off_s,
+                        period=on_s + off_s, period_min=(on_s + off_s) / 60.0,
+                        rate=effective_rate))
+                self.logger.debug("Turning pump on to dispense {ml:.1f} ml at {rate:.4f} ml/min.".format(
+                    ml=amount, rate=effective_rate))
+
+                write_db = threading.Thread(
+                    target=self.dispense_volume_rate,
+                    args=(amount, effective_rate, on_s, off_s))
                 write_db.start()
                 return
 
