@@ -81,27 +81,30 @@ OUTPUT_INFORMATION = {
     'interfaces': ['GPIO'],
 
     'custom_options_message': (
-        "CALIBRATION: Purge the fluid line, run the pump continuously for 60 seconds, measure the "
-        "dispensed volume in ml, and enter that value as 'Fastest Rate (ml/min)'. "
-        "\n\n"
-        "MODE — Specify Flow Rate: Set 'On Pulse Duration' (e.g. 10 s) and 'Desired Flow Rate'. "
-        "The off time is calculated automatically. "
-        "Effective flow rate = Fastest Rate × (on / (on + off)). "
-        "\n\n"
-        "MODE — Simple Interval: Set 'On Pulse Duration' and 'Off Interval Duration' directly. "
-        "The effective flow rate and cycle period will be calculated and logged each time the pump runs. "
-        "Formula: Flow Rate (ml/min) = Fastest Rate × on_s / (on_s + off_s)."
+        "STEP 1 — Calibrate: Purge the fluid line, run the pump continuously for 60 seconds, "
+        "measure the dispensed volume in ml, and enter it as 'Fastest Rate (ml/min)'.\n\n"
+        "STEP 2 — Choose a mode:\n"
+        "  • Fastest Flow Rate: pump runs continuously at 100% duty cycle.\n"
+        "  • Specify Flow Rate: enter a target ml/min — the off time is calculated for you.\n"
+        "  • Simple Interval: set on and off durations directly — the flow rate is calculated for you.\n\n"
+        "Flow rate formula: Rate (ml/min) = Fastest Rate × On / (On + Off)"
     ),
 
     'custom_channel_options': [
+        # ── Hardware ──────────────────────────────────────────────────────────
+        {
+            'id': 'section_hw',
+            'type': 'message',
+            'default_value': '─── Hardware ───────────────────────────────────'
+        },
         {
             'id': 'pin',
             'type': 'integer',
             'default_value': None,
             'required': False,
             'constraints_pass': constraints_pass_positive_or_zero_value,
-            'name': "{}: {} ({})".format(lazy_gettext('Pin'), lazy_gettext('GPIO'), lazy_gettext('BCM')),
-            'phrase': lazy_gettext('The pin to control the state of')
+            'name': 'GPIO Pin (BCM)',
+            'phrase': 'BCM pin number connected to the pump relay'
         },
         {
             'id': 'on_state',
@@ -111,8 +114,26 @@ OUTPUT_INFORMATION = {
                 (1, 'HIGH'),
                 (0, 'LOW')
             ],
-            'name': lazy_gettext('On State'),
-            'phrase': 'The state of the GPIO that corresponds to an On state'
+            'name': 'On State',
+            'phrase': 'GPIO level that activates the pump (HIGH or LOW depending on relay type)'
+        },
+        {
+            'id': 'amps',
+            'type': 'float',
+            'default_value': 0.0,
+            'required': True,
+            'name': 'Current Draw (Amps)',
+            'phrase': 'Current draw of the pump for power tracking (set 0 to ignore)'
+        },
+
+        # ── Calibration ───────────────────────────────────────────────────────
+        {
+            'id': 'section_cal',
+            'type': 'message',
+            'default_value': (
+                '─── Calibration ─────────────────────────────────\n'
+                'Run pump continuously for 60 s, measure dispensed volume, enter below.'
+            )
         },
         {
             'id': 'fastest_dispense_rate_ml_min',
@@ -120,35 +141,50 @@ OUTPUT_INFORMATION = {
             'default_value': 150.0,
             'constraints_pass': constraints_pass_positive_value,
             'name': 'Fastest Rate (ml/min)',
-            'phrase': 'The fastest rate that the pump can dispense (ml/min), measured at 100% duty cycle'
+            'phrase': 'Volume dispensed in 60 seconds at 100% duty cycle, in ml/min'
         },
+
+        # ── Mode ──────────────────────────────────────────────────────────────
         {
-            'id': 'on_pulse_seconds',
-            'type': 'float',
-            'default_value': 10.0,
-            'constraints_pass': constraints_pass_positive_value,
-            'name': 'On Pulse Duration (Seconds)',
-            'phrase': (
-                'How long the pump runs for each pulse. '
-                'Used in all modes. '
-                'In Specify Flow Rate mode the off time is calculated from this and the desired flow rate. '
-                'In Simple Interval mode both on and off times are set directly.'
-            )
+            'id': 'section_mode',
+            'type': 'message',
+            'default_value': '─── Flow Rate Mode ──────────────────────────────'
         },
         {
             'id': 'flow_mode',
             'type': 'select',
             'default_value': 'fastest_flow_rate',
             'options_select': [
-                ('fastest_flow_rate', 'Fastest Flow Rate'),
-                ('specify_flow_rate', 'Specify Flow Rate'),
-                ('simple_interval', 'Simple Interval (set on + off directly)')
+                ('fastest_flow_rate', 'Fastest Flow Rate (100% duty cycle)'),
+                ('specify_flow_rate', 'Specify Flow Rate (set ml/min → off time calculated)'),
+                ('simple_interval', 'Simple Interval (set on + off → flow rate calculated)')
             ],
-            'name': 'Flow Rate Method',
+            'name': 'Mode',
             'phrase': (
-                'Fastest Flow Rate: runs continuously at 100% duty cycle. '
-                'Specify Flow Rate: enter ml/min and off time is calculated. '
-                'Simple Interval: set on and off durations directly; effective flow rate is calculated for you.'
+                'Fastest: runs continuously. '
+                'Specify Flow Rate: you set ml/min, off time is derived. '
+                'Simple Interval: you set on/off seconds, flow rate is derived.'
+            )
+        },
+
+        # ── Specify Flow Rate mode ────────────────────────────────────────────
+        {
+            'id': 'section_sfr',
+            'type': 'message',
+            'default_value': (
+                '─── Specify Flow Rate mode ──────────────────────\n'
+                'Set the on pulse and desired ml/min. Off time = On × (1 − duty) / duty.'
+            )
+        },
+        {
+            'id': 'on_pulse_seconds',
+            'type': 'float',
+            'default_value': 10.0,
+            'constraints_pass': constraints_pass_positive_value,
+            'name': 'On Pulse Duration (s)',
+            'phrase': (
+                'Fixed pump-on duration per pulse (seconds). '
+                'Used in Specify Flow Rate and Simple Interval modes.'
             )
         },
         {
@@ -156,29 +192,35 @@ OUTPUT_INFORMATION = {
             'type': 'float',
             'default_value': 10.0,
             'constraints_pass': constraints_pass_positive_value,
-            'name': "{} ({}) — Specify Flow Rate mode".format(lazy_gettext('Desired Flow Rate'), lazy_gettext('ml/min')),
-            'phrase': 'Desired flow rate in ml/min. Used only in Specify Flow Rate mode. Off time is calculated automatically.'
+            'name': 'Desired Flow Rate (ml/min)',
+            'phrase': (
+                'Target flow rate for Specify Flow Rate mode. '
+                'Off time = On × (Fastest / Rate − 1). '
+                'Example: fastest=20.7, on=10 s, rate=0.171 ml/min → off≈1200 s.'
+            )
+        },
+
+        # ── Simple Interval mode ──────────────────────────────────────────────
+        {
+            'id': 'section_si',
+            'type': 'message',
+            'default_value': (
+                '─── Simple Interval mode ────────────────────────\n'
+                'Set on and off durations directly. '
+                'Effective rate = Fastest × On / (On + Off).'
+            )
         },
         {
             'id': 'off_interval_seconds',
             'type': 'float',
             'default_value': 1200.0,
             'constraints_pass': constraints_pass_positive_value,
-            'name': 'Off Interval Duration (Seconds) — Simple Interval mode',
+            'name': 'Off Interval Duration (s)',
             'phrase': (
-                'How long the pump stays off between pulses. Used only in Simple Interval mode. '
-                'Effective flow rate = Fastest Rate × on_s / (on_s + off_s). '
+                'How long the pump stays off between pulses (seconds). '
                 'Example: on=10 s, off=1200 s, fastest=20.7 ml/min → 0.171 ml/min, cycle every 20.2 min.'
             )
         },
-        {
-            'id': 'amps',
-            'type': 'float',
-            'default_value': 0.0,
-            'required': True,
-            'name': "{} ({})".format(lazy_gettext('Current'), lazy_gettext('Amps')),
-            'phrase': 'The current draw of the device being controlled'
-        }
     ]
 }
 
