@@ -63,6 +63,22 @@ OUTPUT_INFORMATION = {
     'dependencies_module': [('pip-pypi', 'RPi.GPIO', 'RPi.GPIO==0.7.1')],
     'interfaces': ['GPIO'],
 
+    'custom_commands': [
+        {
+            'type': 'message',
+            'default_value': (
+                'Emergency stop: immediately halts the running dispense thread and turns the pump off. '
+                'Safe to press at any time.'
+            ),
+        },
+        {
+            'id': 'stop_dispense',
+            'type': 'button',
+            'name': 'Stop / Kill Dispense',
+            'phrase': 'Send a stop signal to the active dispense thread and switch the pump off.'
+        },
+    ],
+
     'custom_options_message': (
         "CALIBRATION (do this first):\n"
         "  Purge the fluid line. Run the pump continuously for exactly 60 seconds and "
@@ -515,3 +531,21 @@ class OutputModule(AbstractOutput):
 
     def is_setup(self):
         return self.output_setup
+
+    # ------------------------------------------------------------------
+    # Custom commands (UI buttons)
+    # ------------------------------------------------------------------
+
+    def stop_dispense(self, args_dict):
+        """Immediately stop any running dispense and turn the pump off.
+        Called by the Mycodo UI 'Stop / Kill Dispense' button.
+        """
+        self._stop_event.set()
+        self._stop_event = threading.Event()
+        _DISPENSE_STOP[self.output.unique_id] = self._stop_event
+        self.currently_dispensing = False
+        if self.is_setup():
+            self.GPIO.output(
+                self.options_channels['pin'][0],
+                not self.options_channels['on_state'][0])
+        self.logger.info("Dispense stopped via UI button.")
