@@ -25,6 +25,12 @@ from mycodo.utils.constraints_pass import constraints_pass_positive_value
 from mycodo.utils.database import db_retrieve_table_daemon
 from mycodo.utils.influx import add_measurements_influxdb
 
+# One stop-Event per output unique_id.  When Mycodo re-initialises an output
+# (after a settings save) it creates a NEW OutputModule while the old dispense
+# thread is still alive.  Signalling the old event here is the only reliable
+# way to stop that orphaned thread and return the pin to single ownership.
+_DISPENSE_STOP: dict = {}
+
 measurements_dict = {
     0: {'measurement': 'duration_time', 'unit': 's',  'name': 'Pump On'},
     1: {'measurement': 'volume',        'unit': 'ml', 'name': 'Dispense Volume'},
@@ -241,6 +247,15 @@ class OutputModule(AbstractOutput):
         self.GPIO = GPIO
         self.setup_output_variables(OUTPUT_INFORMATION)
 
+        # Cancel any dispense thread left behind by a previous instance of
+        # this output (e.g. after a settings save that re-creates the module).
+        uid = self.output.unique_id
+        old_ev = _DISPENSE_STOP.pop(uid, None)
+        if old_ev is not None:
+            old_ev.set()
+        self._stop_event = threading.Event()
+        _DISPENSE_STOP[uid] = self._stop_event
+
         if self.options_channels['pin'][0] is None:
             self.logger.warning("No GPIO pin configured — output will not function.")
             return
@@ -337,14 +352,14 @@ class OutputModule(AbstractOutput):
     # Dispense methods
     # ------------------------------------------------------------------
 
-    def dispense_volume_fastest(self, amount, total_dispense_seconds):
+    def dispense_volume_fastest(self, amount, total_dispense_seconds, stop_event):
         self.currently_dispensing = True
         self.logger.debug("Output turned on")
         self.GPIO.output(self.options_channels['pin'][0], self.options_channels['on_state'][0])
         timer_dispense = time.time() + total_dispense_seconds
         timestamp_start = datetime.datetime.utcnow()
 
-        while time.time() < timer_dispense and self.currently_dispensing:
+        while time.time() < timer_dispense and not stop_event.is_set():
             time.sleep(0.01)
 
         self.GPIO.output(self.options_channels['pin'][0], not self.options_channels['on_state'][0])
@@ -353,7 +368,7 @@ class OutputModule(AbstractOutput):
         self.record_dispersal(amount, total_dispense_seconds, total_dispense_seconds,
                               timestamp=timestamp_start)
 
-    def dispense_volume_rate(self, amount, dispense_rate, repeat_seconds_on, repeat_seconds_off):
+    def dispense_volume_rate(self, amount, dispense_rate, repeat_seconds_on, repeat_seconds_off, stop_event):
         total_s   = amount / dispense_rate * 60
         duty      = repeat_seconds_on / (repeat_seconds_on + repeat_seconds_off)
         on_total  = total_s * duty
@@ -372,17 +387,17 @@ class OutputModule(AbstractOutput):
         timer_dispense = time.time() + total_s
         timestamp_start = datetime.datetime.utcnow()
 
-        while time.time() < timer_dispense and self.currently_dispensing:
+        while time.time() < timer_dispense and not stop_event.is_set():
             timer_on = time.time() + repeat_seconds_on
             self.logger.debug("Output turned on")
             self.GPIO.output(self.options_channels['pin'][0], self.options_channels['on_state'][0])
-            while time.time() < timer_on and self.currently_dispensing:
+            while time.time() < timer_on and not stop_event.is_set():
                 time.sleep(0.01)
 
             timer_off = time.time() + repeat_seconds_off
             self.logger.debug("Output turned off")
             self.GPIO.output(self.options_channels['pin'][0], not self.options_channels['on_state'][0])
-            while time.time() < timer_off and self.currently_dispensing:
+            while time.time() < timer_off and not stop_event.is_set():
                 time.sleep(0.01)
 
         self.currently_dispensing = False
@@ -415,32 +430,44 @@ class OutputModule(AbstractOutput):
         mode    = self.options_channels['flow_mode'][0]
 
         if state == 'off':
-            if self.currently_dispensing:
-                self.currently_dispensing = False
+            # Signal whichever thread currently owns the pin (current or orphaned).
+            self._stop_event.set()
+            self._stop_event = threading.Event()
+            _DISPENSE_STOP[self.output.unique_id] = self._stop_event
+            self.currently_dispensing = False
             self.logger.debug("Output turned off")
             self.GPIO.output(self.options_channels['pin'][0], not self.options_channels['on_state'][0])
 
         elif state == 'on' and output_type in ['vol', None] and amount:
+            # Stop any running dispense — both on THIS instance and any orphaned
+            # thread left by a previous instance after a settings save/restart.
             if self.currently_dispensing:
                 self.logger.debug("Overriding current dispense with new instruction.")
+            self._stop_event.set()
+            self._stop_event = threading.Event()
+            _DISPENSE_STOP[self.output.unique_id] = self._stop_event
+            stop_ev = self._stop_event  # captured by the new thread
 
             if mode == 'fastest_flow_rate':
                 total_s = amount / fastest * 60
                 self.logger.info("Fastest mode: {:.1f} ml in {:.1f} s".format(amount, total_s))
                 threading.Thread(target=self.dispense_volume_fastest,
-                                 args=(amount, total_s)).start()
+                                 args=(amount, total_s, stop_ev),
+                                 daemon=True).start()
 
             elif mode == 'specify_flow_rate':
                 rate = min(self.options_channels['flow_rate'][0], fastest)
                 off_s, _, _ = _cycle_from_rate(rate, fastest, on_s)
                 threading.Thread(target=self.dispense_volume_rate,
-                                 args=(amount, rate, on_s, off_s)).start()
+                                 args=(amount, rate, on_s, off_s, stop_ev),
+                                 daemon=True).start()
 
             elif mode == 'simple_interval':
                 off_s = self.options_channels['off_interval_seconds'][0]
                 rate  = fastest * on_s / (on_s + off_s)
                 threading.Thread(target=self.dispense_volume_rate,
-                                 args=(amount, rate, on_s, off_s)).start()
+                                 args=(amount, rate, on_s, off_s, stop_ev),
+                                 daemon=True).start()
 
             elif mode == 'target_dose':
                 total_ml    = self.options_channels['target_volume_ml'][0]
@@ -452,7 +479,8 @@ class OutputModule(AbstractOutput):
                         "Requested {:.1f} ml but target_volume is {:.1f} ml — "
                         "using requested amount at configured rate.".format(amount, total_ml))
                 threading.Thread(target=self.dispense_volume_rate,
-                                 args=(amount, rate, on_s, off_s)).start()
+                                 args=(amount, rate, on_s, off_s, stop_ev),
+                                 daemon=True).start()
 
             else:
                 self.logger.error("Unknown mode: '{}'".format(mode))
@@ -460,6 +488,10 @@ class OutputModule(AbstractOutput):
         elif state == 'on' and output_type == 'sec':
             if self.currently_dispensing:
                 self.logger.debug("Overriding current dispense.")
+                self._stop_event.set()
+                self._stop_event = threading.Event()
+                _DISPENSE_STOP[self.output.unique_id] = self._stop_event
+                self.currently_dispensing = False
             self.logger.debug("Output turned on (duration mode)")
             self.GPIO.output(self.options_channels['pin'][0], self.options_channels['on_state'][0])
 
