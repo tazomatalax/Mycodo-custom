@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.0] - 2026-08-20
+
+### Added
+- **Live Feed Rate Trimming & Foam Mitigation**: Real-time multiplier (`feed_rate_scale`) and quick UI commands (`Trim -10%`, `Trim +10%`, `Quick Foam Backoff (-25%)`, `Reset Trim`) allowing dynamic feed adjustment during foaming or non-standard growth without controller restart.
+- **Stage 3 Overfeed / Runaway Safety Clamp**: Added `stage3_max_rate_clamp_ml_h` enforcing a strict maximum on cumulative Pump A feed dosed within any rolling 1-hour window, preventing toxicity and foam flares caused by sensor drift.
+- **Persistent Runtime State Management**: Full DB persistence for `stage_start_time`, `is_paused`, `feed_rate_scale`, and `stage3_pulses`, ensuring stage elapsed time and feeding profiles are preserved when users edit settings in the Mycodo web UI during an active run.
+- **7 L Bench-Scale Parameter Mapping**: Pre-configured defaults for 7 L scale ($V_0 = 5.0\text{ L}$, $500\text{ g/L}$ nitrogen stock, concentrated carbon stock, $\mu = 0.268\text{ h}^{-1}$, $F_{0,A} = 8.08\text{ mL/h}$, $F_{0,B} = 3.01\text{ mL/h}$, $T = 6.13\text{ h}$, Stage 3 N cutoff).
+
 ## [1.1.0] - 2026-08-20
 
 ### Added
@@ -13,7 +21,8 @@
 
 ### Added
 - Initial release of `pha_fedbatch_controller.py` for Mycodo.
-- Independent and coupled dual-pump control (GPIO 3 & GPIO 4).
-- Operating range clamps (min/max flow rates) for Octanoic Acid and Ammonium Sulfate.
-- Two-stage fed-batch automation: Phase 2 Exponential Feed + Phase 3 pH-Stat Carbon Feed.
+- Independent and coupled dual-pump control.
+- Operating range clamps (min/max flow rates) for primary substrate and co-feed.
+- Two-stage fed-batch automation: Phase 2 Exponential Feed + Phase 3 Feedback Dosing.
 - Real-time volume tracking and live HTML status display.
+

@@ -76,19 +76,23 @@ $$\text{Effective Pulse Volume} = \text{Base Dose} \times \max\left(1.0, \frac{V
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `period` | Float | `30.0` | Control loop cycle time in seconds |
-| `calc_mode` | Select | `stoichiometric_balance` | `stoichiometric_balance` (auto $F_0$, ratio, N-target) or `direct_rates` (manual $F_0$, ratio) |
+| `calc_mode` | Select | `direct_rates` | `direct_rates` (manual $F_0$, ratio) or `stoichiometric_balance` (auto $F_0$, ratio, N-target) |
 | `growth_rate_mu` | Float | `0.268` | Target specific growth rate $\mu$ ($1/\text{h}$) |
 | `feed_profile` | Select | `exponential` | Profile shape: `exponential`, `linear`, or `constant` |
 | `control_mode` | Select | `coupled_ratio` | `coupled_ratio` ($F_B = F_A / R_{A:B}$) or `independent` |
-| `initial_volume_l` | Float | `1.0` | Initial bioreactor working volume $V_0$ ($\text{L}$) |
+| `feed_rate_scale` | Float | `1.0` | Active feed rate multiplier (1.0 = 100%, adjustable live via Trim buttons) |
+| `initial_volume_l` | Float | `5.0` | Initial bioreactor working volume $V_0$ ($\text{L}$) |
 | `initial_biomass_g_l` | Float | `2.0` | Initial biomass concentration $X_0$ ($\text{g/L CDW}$) |
 | `target_biomass_g_l` | Float | `25.0` | Target biomass $X_{\text{target}}$ at end of Stage 2 ($\text{g/L CDW}$) |
 | `yield_yxs_g_g` | Float | `0.65` | Biomass yield on carbon substrate $Y_{X/S}$ ($\text{g CDW / g sub}$) |
 | `yield_yxn_g_g` | Float | `4.20` | Biomass yield on nitrogen stock salt $Y_{X/N}$ ($\text{g CDW / g N-salt}$) |
 | `stock_c_conc_g_l` | Float | `910.0` | Carbon substrate concentration in Pump A bottle $S_{i,A}$ ($\text{g/L}$) |
-| `stock_n_conc_g_l` | Float | `200.0` | Nitrogen salt concentration in Pump B bottle $N_{i,B}$ ($\text{g/L}$) |
+| `stock_n_conc_g_l` | Float | `500.0` | Nitrogen salt concentration in Pump B bottle $N_{i,B}$ ($\text{g/L}$) |
 | `maintenance_ms_g_g_h` | Float | `0.02` | Maintenance coefficient $m_S$ ($\text{g sub / g CDW / h}$) |
-| `transition_trigger` | Select | `nitrogen_delivered` | Transition mode: `nitrogen_delivered`, `sensor_trigger`, or `time_duration` |
+| `ratio_a_to_b` | Float | `2.684` | Manual ratio ($F_{0,A} / F_{0,B} = 8.08 / 3.01 = 2.684$) |
+| `f0_pump_a_ml_h` | Float | `8.08` | Manual initial rate for Pump A ($\text{mL/h}$) |
+| `f0_pump_b_ml_h` | Float | `3.01` | Manual initial rate for Pump B ($\text{mL/h}$) |
+| `transition_trigger` | Select | `time_duration` | Transition mode: `time_duration`, `nitrogen_delivered`, or `sensor_trigger` |
 | `stage2_duration_hours` | Float | `6.13` | Stage 2 duration / safety timeout ($\text{h}$) |
 | `output_pump_a` | Channel | — | Output channel for Carbon Pump |
 | `pump_a_cal_ml_min` | Float | `10.0` | Pump A flow calibration at 100% duty cycle ($\text{mL/min}$) |
@@ -96,14 +100,15 @@ $$\text{Effective Pulse Volume} = \text{Base Dose} \times \max\left(1.0, \frac{V
 | `output_pump_b` | Channel | — | Output channel for Nitrogen Pump |
 | `pump_b_cal_ml_min` | Float | `10.0` | Pump B flow calibration at 100% duty cycle ($\text{mL/min}$) |
 | `pump_b_min_clamp_ml_h` / `max` | Float | `0.5` / `25.0` | Min/Max safe flow rate bounds for Pump B ($\text{mL/h}$) |
-| `stage3_pump_b_action` | Select | `trickle_nitrogen` | Stage 3 policy: `trickle_nitrogen`, `stop`, `maintain`, or `continue_profile` |
+| `stage3_pump_b_action` | Select | `stop` | Stage 3 policy: `stop` (0 mL/h full N-starvation), `trickle_nitrogen`, `maintain`, or `continue_profile` |
 | `stage3_trickle_n_rate_ml_h` | Float | `0.5` | Nitrogen flow rate during Stage 3 trickle mode ($\text{mL/h}$) |
 | `select_feedback_sensor` | Measurement | — | Stage 3 feedback measurement (pH or DO) |
 | `feedback_trigger_direction` | Select | `above_threshold` | `above_threshold` (pH-stat / DO-spike) or `below_threshold` (DO-stat) |
-| `feedback_threshold_val` | Float | `6.52` | Trigger setpoint value |
-| `feedback_dose_vol_ml` | Float | `0.08` | Base pulse dose volume ($\text{mL}$) |
+| `feedback_threshold_val` | Float | `6.52` | Trigger setpoint value ($\text{pH } > 6.52$) |
+| `feedback_dose_vol_ml` | Float | `0.10` | Base pulse dose volume ($\text{mL}$) |
 | `volume_adaptive_dose` | Bool | `True` | Scale pulse dose volume proportionally with $V(t)/V_0$ |
 | `feedback_cooldown_sec` | Float | `90.0` | Minimum pause between consecutive pulses ($\text{s}$) |
+| `stage3_max_rate_clamp_ml_h` | Float | `15.0` | Maximum allowable Pump A dosage per rolling 1-hour window ($\text{mL/h}$) |
 
 ---
 
@@ -136,23 +141,26 @@ flowchart LR
 
 ### Step 3: Feed Stock Formulation
 1. Prepare high-concentration stock feeds to minimize culture dilution:
-   * **Carbon:** Neat fatty acids ($S_{i,A} \approx 910\text{ g/L}$) or concentrated sugars ($500–700\text{ g/L}$).
-   * **Nitrogen:** Aqueous salt near room-temperature solubility ($200–300\text{ g/L}$ $(NH_4)_2SO_4$).
+   * **Carbon / Primary Substrate:** Concentrated feed solution (e.g., sugars $500–700\text{ g/L}$, pure liquid substrates, etc.).
+   * **Nitrogen / Co-Feed:** Aqueous stock near room-temperature solubility (e.g., nitrogen salts $200–500\text{ g/L}$, amino acid/complex feeds).
 
 ### Step 4: Bioreactor Sizing & OTR Feasibility
 1. Compute estimated final volume $V_{\text{final}} = V_0 + \Delta V_A + \Delta V_B$ to ensure $V_{\text{final}} < V_{\text{max, vessel}}$.
 2. Verify that peak Oxygen Uptake Rate ($OUR_{\max} = \frac{\mu X_{\text{target}} V_{\text{final}}}{Y_{X/O_2}}$) is below the bioreactor's maximum Oxygen Transfer Rate ($OTR_{\max}$).
 
 ### Step 5: Stage 3 Feedback Mode Selection
-1. Perform a carbon pulse test near batch substrate exhaustion:
-   * **Acidic Substrates (Octanoate, Acetate):** pH rises upon starvation; dosing acid restores pH $\rightarrow$ Use **pH-stat** (`above_threshold`).
-   * **Neutral Substrates (Glucose, Glycerol):** Respiration halts upon starvation $\rightarrow$ DO spikes $\rightarrow$ Use **DO-stat** or **DO-spike trigger**.
+1. Perform a pulse test near batch substrate exhaustion:
+   * **Substrates altering pH upon consumption (e.g. organic acids / ammonium salts):** pH shifts upon starvation; dosing restores setpoint $\rightarrow$ Use **pH-stat** (`above_threshold`).
+   * **Substrates with rapid respiratory response (e.g. sugars, alcohols):** Respiration halts upon starvation $\rightarrow$ DO spikes $\rightarrow$ Use **DO-stat** or **DO-spike trigger**.
 
 ---
 
 ## Operational Commands
 
 - **Start Active Feeding (Stage 2):** Calculates initial stoichiometric flow rates, starts growth profiles, and enables mass integration.
-- **Switch to Product Stage (Stage 3):** Manually switches controller to Stage 3 policy (trickle N + adaptive sensor-stat).
+- **Switch to Product Stage (Stage 3):** Manually switches controller to Stage 3 policy (nitrogen cutoff + adaptive sensor-stat micro-dosing).
 - **Pause / Resume:** Temporarily halts pump pulsing without losing timers or volume integration totals.
 - **Reset Totals & Stage:** Reinitializes cumulative volume counters and resets controller state back to Stage 1 (Standby).
+- **Trim Feed -10% / +10%:** Live decrement/increment of active feed rate multiplier without restarting controller.
+- **Quick Foam Backoff (-25%):** Instant reduction of feeding to 75% for emergency foam mitigation.
+- **Reset Trim (100%):** Restores feed multiplier back to nominal rate (1.0).

@@ -8,8 +8,10 @@
 #  - Independent vs Coupled Ratio mode (maintains A:B volumetric/mass ratio)
 #  - Profile modes: Exponential (F0 * e^(mu*t)), Linear ramp, or Constant rate
 #  - Physiological Stage Transitions: Cumulative Nitrogen Delivered, DO Spike, or Timed
-#  - Stage 3 Adaptive Sensor-Stat (pH-stat, DO-stat) with Volume-Scaled Pulse Dosing
+#  - Stage 3 Adaptive Sensor-Stat (pH-stat, DO-stat) with Volume-Scaled Pulse Dosing & Runaway Safety Clamp
 #  - Stage 3 Nitrogen Management: Full Starvation, Maintenance Trickle N, or Constant Ratio
+#  - Live Feed Rate Scaling Multiplier & Quick Action Foam Backoff Commands
+#  - Persistent Runtime State Preservation (preserves elapsed time & totals across UI setting updates)
 #  - Dynamic Broth Volume V(t) and Biomass X(t) Tracking
 #
 import threading
@@ -32,7 +34,8 @@ FUNCTION_INFORMATION = {
     'message': 'Advanced dual-pump controller for microbial fed-batch fermentation. '
                'Implements first-principles stoichiometric balances (C:N, Y_XS, Y_XN), '
                'dynamic growth feeds, physiological stage transitions (N-mass/DO-spike), '
-               'and adaptive sensor-stat feedback with maintenance trickle feeding.',
+               'live feed rate trim / foam mitigation, persistent timer state across reconfigurations, '
+               'and adaptive sensor-stat feedback with overfeed runaway safety protection.',
 
     'options_enabled': [
         'custom_options',
@@ -67,6 +70,33 @@ FUNCTION_INFORMATION = {
             'type': 'button',
             'wait_for_return': True,
             'name': 'Reset Totals & Stage'
+        },
+        {
+            'type': 'new_line'
+        },
+        {
+            'id': 'cmd_trim_minus_10',
+            'type': 'button',
+            'wait_for_return': True,
+            'name': 'Trim Feed -10%'
+        },
+        {
+            'id': 'cmd_trim_plus_10',
+            'type': 'button',
+            'wait_for_return': True,
+            'name': 'Trim Feed +10%'
+        },
+        {
+            'id': 'cmd_trim_foam_backoff',
+            'type': 'button',
+            'wait_for_return': True,
+            'name': 'Quick Foam Backoff (-25%)'
+        },
+        {
+            'id': 'cmd_trim_reset',
+            'type': 'button',
+            'wait_for_return': True,
+            'name': 'Reset Trim (100%)'
         }
     ],
 
@@ -97,11 +127,11 @@ FUNCTION_INFORMATION = {
         {
             'id': 'calc_mode',
             'type': 'select',
-            'default_value': 'stoichiometric_balance',
+            'default_value': 'direct_rates',
             'required': True,
             'options_select': [
-                ('stoichiometric_balance', 'Stoichiometric Model (Auto F0, Ratio, & N-Target)'),
-                ('direct_rates', 'Direct Manual Rates (Legacy F0 & Ratio)')
+                ('direct_rates', 'Direct Manual Rates (Plan Equation F0 & Ratio)'),
+                ('stoichiometric_balance', 'Stoichiometric Model (Auto F0, Ratio, & N-Target)')
             ],
             'name': 'Model & Parameterization Mode'
         },
@@ -137,6 +167,15 @@ FUNCTION_INFORMATION = {
             'name': 'Coupling Mode'
         },
         {
+            'id': 'feed_rate_scale',
+            'type': 'float',
+            'default_value': 1.0,
+            'required': True,
+            'constraints_pass': constraints_pass_positive_value,
+            'name': 'Feed Rate Scale Multiplier (1.0 = 100%)',
+            'phrase': 'Active feed rate scaling multiplier (also adjustable live via Trim buttons)'
+        },
+        {
             'type': 'new_line'
         },
 
@@ -144,7 +183,7 @@ FUNCTION_INFORMATION = {
         {
             'id': 'initial_volume_l',
             'type': 'float',
-            'default_value': 1.0,
+            'default_value': 5.0,
             'required': True,
             'constraints_pass': constraints_pass_positive_value,
             'name': 'Initial Working Volume V0 (L)',
@@ -193,16 +232,16 @@ FUNCTION_INFORMATION = {
             'required': True,
             'constraints_pass': constraints_pass_positive_value,
             'name': 'Carbon Stock Concentration S_i,A (g/L)',
-            'phrase': 'Concentration of carbon substrate in Pump A feed bottle'
+            'phrase': 'Concentration of carbon substrate in Pump A feed bottle (g/L)'
         },
         {
             'id': 'stock_n_conc_g_l',
             'type': 'float',
-            'default_value': 200.0,
+            'default_value': 500.0,
             'required': True,
             'constraints_pass': constraints_pass_positive_value,
             'name': 'Nitrogen Stock Concentration N_i,B (g/L)',
-            'phrase': 'Concentration of nitrogen salt in Pump B feed bottle'
+            'phrase': 'Concentration of nitrogen substrate in Pump B feed bottle (g/L)'
         },
         {
             'id': 'maintenance_ms_g_g_h',
@@ -221,11 +260,11 @@ FUNCTION_INFORMATION = {
         {
             'id': 'ratio_a_to_b',
             'type': 'float',
-            'default_value': 2.687,
+            'default_value': 2.684,
             'required': True,
             'constraints_pass': constraints_pass_positive_value,
             'name': 'Manual Ratio (Pump A : Pump B)',
-            'phrase': 'Used when Mode is Direct Manual Rates'
+            'phrase': 'Used when Mode is Direct Manual Rates (F0_A / F0_B)'
         },
         {
             'id': 'f0_pump_a_ml_h',
@@ -233,7 +272,8 @@ FUNCTION_INFORMATION = {
             'default_value': 8.08,
             'required': True,
             'constraints_pass': constraints_pass_positive_or_zero_value,
-            'name': 'Manual Pump A Initial Rate F0 (mL/h)'
+            'name': 'Manual Pump A Initial Rate F0 (mL/h)',
+            'phrase': 'Initial Pump A carbon/substrate feed rate F0'
         },
         {
             'id': 'f0_pump_b_ml_h',
@@ -241,7 +281,8 @@ FUNCTION_INFORMATION = {
             'default_value': 3.01,
             'required': True,
             'constraints_pass': constraints_pass_positive_or_zero_value,
-            'name': 'Manual Pump B Initial Rate F0 (mL/h)'
+            'name': 'Manual Pump B Initial Rate F0 (mL/h)',
+            'phrase': 'Initial Pump B nitrogen/co-feed rate F0'
         },
         {
             'type': 'new_line'
@@ -251,11 +292,11 @@ FUNCTION_INFORMATION = {
         {
             'id': 'transition_trigger',
             'type': 'select',
-            'default_value': 'nitrogen_delivered',
+            'default_value': 'time_duration',
             'required': True,
             'options_select': [
-                ('nitrogen_delivered', 'Stoichiometric N-Mass Delivered (Target Biomass reached)'),
                 ('time_duration', 'Timed Elapsed Duration (Hours)'),
+                ('nitrogen_delivered', 'Stoichiometric N-Mass Delivered (Target Biomass reached)'),
                 ('sensor_trigger', 'Online Sensor Trigger (DO Spike / pH Shift)')
             ],
             'name': 'Stage 2 -> Stage 3 Transition Trigger'
@@ -267,7 +308,7 @@ FUNCTION_INFORMATION = {
             'required': True,
             'constraints_pass': constraints_pass_positive_value,
             'name': 'Stage 2 Max Duration (Hours)',
-            'phrase': 'Used for Timed transition or safety timeout'
+            'phrase': 'Stage 2 exponential feed cutoff duration (6.13 h)'
         },
         {
             'type': 'new_line'
@@ -351,11 +392,11 @@ FUNCTION_INFORMATION = {
         {
             'id': 'stage3_pump_b_action',
             'type': 'select',
-            'default_value': 'trickle_nitrogen',
+            'default_value': 'stop',
             'required': True,
             'options_select': [
-                ('trickle_nitrogen', 'Trickle Nitrogen (Constant Low Maintenance Feed)'),
                 ('stop', 'Stop Pump B (0 mL/h - Full Starvation)'),
+                ('trickle_nitrogen', 'Trickle Nitrogen (Constant Low Maintenance Feed)'),
                 ('maintain', 'Maintain Final Flow Rate'),
                 ('continue_profile', 'Continue Profile')
             ],
@@ -368,7 +409,7 @@ FUNCTION_INFORMATION = {
             'required': True,
             'constraints_pass': constraints_pass_positive_or_zero_value,
             'name': 'Stage 3 Trickle N Flow Rate (mL/h)',
-            'phrase': 'Maintains active metabolism and prevents metabolic arrest'
+            'phrase': 'Used when policy is Trickle Nitrogen'
         },
         {
             'id': 'select_feedback_sensor',
@@ -402,12 +443,12 @@ FUNCTION_INFORMATION = {
             'type': 'float',
             'default_value': 6.52,
             'required': True,
-            'name': 'Sensor Trigger Threshold'
+            'name': 'Sensor Trigger Threshold (e.g., pH or DO setpoint)'
         },
         {
             'id': 'feedback_dose_vol_ml',
             'type': 'float',
-            'default_value': 0.08,
+            'default_value': 0.10,
             'required': True,
             'constraints_pass': constraints_pass_positive_value,
             'name': 'Base Pulse Dose Volume (mL)'
@@ -426,6 +467,15 @@ FUNCTION_INFORMATION = {
             'required': True,
             'constraints_pass': constraints_pass_positive_value,
             'name': 'Feedback Dose Cooldown (seconds)'
+        },
+        {
+            'id': 'stage3_max_rate_clamp_ml_h',
+            'type': 'float',
+            'default_value': 15.0,
+            'required': True,
+            'constraints_pass': constraints_pass_positive_value,
+            'name': 'Stage 3 Max Feed A Rate Clamp (mL/h)',
+            'phrase': 'Safety ceiling on rolling 1-hour Pump A dosage to prevent overfeeding, toxicity, or foam runaway'
         }
     ]
 }
@@ -447,6 +497,7 @@ class CustomModule(AbstractFunction):
         self.growth_rate_mu = None
         self.feed_profile = None
         self.control_mode = None
+        self.feed_rate_scale = 1.0
 
         # Stoichiometry
         self.initial_volume_l = None
@@ -494,6 +545,7 @@ class CustomModule(AbstractFunction):
         self.feedback_dose_vol_ml = None
         self.volume_adaptive_dose = None
         self.feedback_cooldown_sec = None
+        self.stage3_max_rate_clamp_ml_h = None
 
         # Runtime calculated stoichiometric values
         self.computed_f0_a_ml_h = 0.0
@@ -508,6 +560,7 @@ class CustomModule(AbstractFunction):
         self.is_paused = False
         self.stage_start_time = None
         self.last_feedback_pulse = 0.0
+        self.stage3_window_pulses = []  # List of (timestamp, volume_ml) in last 3600s
         self.rate_a_ml_h = 0.0
         self.rate_b_ml_h = 0.0
         self.operating_ratio = 0.0
@@ -515,7 +568,7 @@ class CustomModule(AbstractFunction):
         self.total_b_ml = 0.0
         self.cumulative_n_delivered_g = 0.0
         self.cumulative_c_delivered_g = 0.0
-        self.current_volume_l = 1.0
+        self.current_volume_l = 5.0
         self.current_biomass_g_l = 0.0
         self.stage3_pulses = 0
 
@@ -530,10 +583,29 @@ class CustomModule(AbstractFunction):
         self.output_pump_a_channel = self.get_output_channel_from_channel_id(self.output_pump_a_channel_id)
         self.output_pump_b_channel = self.get_output_channel_from_channel_id(self.output_pump_b_channel_id)
 
-        # Restore totals from DB
+        # Restore persistent runtime states from DB
         self.total_a_ml = float(self.get_custom_option("total_a_ml") or 0.0)
         self.total_b_ml = float(self.get_custom_option("total_b_ml") or 0.0)
         self.current_stage = int(self.get_custom_option("current_stage") or 1)
+
+        start_time_val = self.get_custom_option("stage_start_time")
+        if start_time_val is not None and float(start_time_val) > 0:
+            self.stage_start_time = float(start_time_val)
+        else:
+            self.stage_start_time = None
+
+        paused_val = self.get_custom_option("is_paused")
+        if paused_val is not None:
+            self.is_paused = bool(paused_val)
+
+        trim_val = self.get_custom_option("feed_rate_scale")
+        if trim_val is not None:
+            self.feed_rate_scale = float(trim_val)
+        elif self.feed_rate_scale is None:
+            self.feed_rate_scale = 1.0
+
+        self.stage3_pulses = int(self.get_custom_option("stage3_pulses") or 0)
+        self.stage3_window_pulses = []
 
         # Calculate stoichiometry
         self.calculate_stoichiometry()
@@ -541,13 +613,13 @@ class CustomModule(AbstractFunction):
 
     def calculate_stoichiometry(self):
         """Compute initial feed rates, stoichiometric ratios, and required nitrogen from first principles."""
-        v0 = max(float(self.initial_volume_l or 1.0), 0.01)
+        v0 = max(float(self.initial_volume_l or 5.0), 0.01)
         x0 = max(float(self.initial_biomass_g_l or 2.0), 0.01)
         x_target = max(float(self.target_biomass_g_l or 25.0), x0)
         yxs = max(float(self.yield_yxs_g_g or 0.65), 0.001)
         yxn = max(float(self.yield_yxn_g_g or 4.20), 0.001)
         c_stock = max(float(self.stock_c_conc_g_l or 910.0), 0.1)
-        n_stock = max(float(self.stock_n_conc_g_l or 200.0), 0.1)
+        n_stock = max(float(self.stock_n_conc_g_l or 500.0), 0.1)
         mu = max(float(self.growth_rate_mu or 0.268), 0.0)
         ms = max(float(self.maintenance_ms_g_g_h or 0.02), 0.0)
 
@@ -582,15 +654,15 @@ class CustomModule(AbstractFunction):
         if mu > 0:
             self.est_stage2_duration_h = math.log(x_target / x0) / mu
         else:
-            self.est_stage2_duration_h = float(self.stage2_duration_hours or 6.0)
+            self.est_stage2_duration_h = float(self.stage2_duration_hours or 6.13)
 
     def update_mass_and_volume_estimates(self):
         """Update current broth volume, delivered elemental masses, and cell dry weight."""
-        v0 = max(float(self.initial_volume_l or 1.0), 0.01)
+        v0 = max(float(self.initial_volume_l or 5.0), 0.01)
         x0 = max(float(self.initial_biomass_g_l or 2.0), 0.01)
         yxn = max(float(self.yield_yxn_g_g or 4.20), 0.001)
         c_stock = max(float(self.stock_c_conc_g_l or 910.0), 0.1)
-        n_stock = max(float(self.stock_n_conc_g_l or 200.0), 0.1)
+        n_stock = max(float(self.stock_n_conc_g_l or 500.0), 0.1)
 
         self.current_volume_l = v0 + ((self.total_a_ml + self.total_b_ml) / 1000.0)
         self.cumulative_c_delivered_g = (self.total_a_ml / 1000.0) * c_stock
@@ -619,6 +691,7 @@ class CustomModule(AbstractFunction):
     def process_stage2(self):
         if not self.stage_start_time:
             self.stage_start_time = time.time()
+            self.set_custom_option("stage_start_time", self.stage_start_time)
 
         elapsed_h = (time.time() - self.stage_start_time) / 3600.0
 
@@ -655,8 +728,9 @@ class CustomModule(AbstractFunction):
         if should_transition:
             self.logger.info(f"Stage 2 complete [{reason}]. Switching to Stage 3 (Product Phase).")
             self.current_stage = 3
-            self.set_custom_option("current_stage", 3)
             self.stage_start_time = time.time()
+            self.set_custom_option("current_stage", 3)
+            self.set_custom_option("stage_start_time", self.stage_start_time)
             return
 
         # Determine baseline F0 and Ratio based on calculation mode
@@ -688,6 +762,11 @@ class CustomModule(AbstractFunction):
             else:
                 calc_b = f0_b
 
+        # Apply Live Feed Rate Scaling Multiplier
+        scale = max(float(self.feed_rate_scale or 1.0), 0.0)
+        calc_a *= scale
+        calc_b *= scale
+
         # Apply Safety Clamps
         self.rate_a_ml_h = max(self.pump_a_min_clamp_ml_h, min(calc_a, self.pump_a_max_clamp_ml_h))
         self.rate_b_ml_h = max(self.pump_b_min_clamp_ml_h, min(calc_b, self.pump_b_max_clamp_ml_h))
@@ -709,6 +788,7 @@ class CustomModule(AbstractFunction):
         elif self.stage3_pump_b_action == 'continue_profile':
             if not self.stage_start_time:
                 self.stage_start_time = time.time()
+                self.set_custom_option("stage_start_time", self.stage_start_time)
             elapsed_h = (time.time() - self.stage_start_time) / 3600.0
             calc_b = self.computed_f0_b_ml_h * math.exp(self.growth_rate_mu * elapsed_h)
             self.rate_b_ml_h = max(self.pump_b_min_clamp_ml_h, min(calc_b, self.pump_b_max_clamp_ml_h))
@@ -732,16 +812,30 @@ class CustomModule(AbstractFunction):
 
         if triggered:
             # Volume-Adaptive Pulse Sizing
-            v0 = max(float(self.initial_volume_l or 1.0), 0.01)
+            v0 = max(float(self.initial_volume_l or 5.0), 0.01)
             vol_scale = max(self.current_volume_l / v0, 1.0) if self.volume_adaptive_dose else 1.0
             effective_dose_ml = self.feedback_dose_vol_ml * vol_scale
+
+            # Safety Hourly Dosage Clamp Check
+            self.stage3_window_pulses = [(ts, d) for ts, d in self.stage3_window_pulses if (now - ts) <= 3600.0]
+            recent_hourly_vol_ml = sum(d for _, d in self.stage3_window_pulses)
+            max_hourly = float(self.stage3_max_rate_clamp_ml_h or 15.0)
+
+            if recent_hourly_vol_ml + effective_dose_ml > max_hourly:
+                self.logger.warning(
+                    f"Stage 3 safety clamp active! Hourly Pump A dosing ({recent_hourly_vol_ml:.2f} mL + {effective_dose_ml:.2f} mL) "
+                    f"exceeds max clamp ({max_hourly:.2f} mL/h). Suppressing pulse to prevent overfeeding."
+                )
+                return
 
             on_sec = effective_dose_ml / (self.pump_a_cal_ml_min / 60.0)
             self.trigger_pulse(self.output_pump_a_device_id, self.output_pump_a_channel, on_sec)
             self.last_feedback_pulse = now
             self.stage3_pulses += 1
+            self.stage3_window_pulses.append((now, effective_dose_ml))
             self.total_a_ml += effective_dose_ml
             self.set_custom_option("total_a_ml", self.total_a_ml)
+            self.set_custom_option("stage3_pulses", self.stage3_pulses)
 
     def deliver_flow(self, device_id, channel, rate_ml_h, cal_ml_min, is_pump_a):
         if not device_id or channel is None or rate_ml_h <= 0 or cal_ml_min <= 0:
@@ -775,6 +869,8 @@ class CustomModule(AbstractFunction):
         self.stage_start_time = time.time()
         self.is_paused = False
         self.set_custom_option("current_stage", 2)
+        self.set_custom_option("stage_start_time", self.stage_start_time)
+        self.set_custom_option("is_paused", False)
         self.calculate_stoichiometry()
         return f"Stage 2 active feeding started (F0_A: {self.computed_f0_a_ml_h:.2f} mL/h, F0_B: {self.computed_f0_b_ml_h:.2f} mL/h)."
 
@@ -783,25 +879,60 @@ class CustomModule(AbstractFunction):
         self.stage_start_time = time.time()
         self.is_paused = False
         self.set_custom_option("current_stage", 3)
+        self.set_custom_option("stage_start_time", self.stage_start_time)
+        self.set_custom_option("is_paused", False)
         return "Stage 3 product / feedback dosing started."
 
     def cmd_pause_feed(self, args_dict):
         self.is_paused = not self.is_paused
+        self.set_custom_option("is_paused", self.is_paused)
         return f"Feeding {'PAUSED' if self.is_paused else 'RESUMED'}."
 
     def cmd_reset_totals(self, args_dict):
-        self.total_a_ml = self.set_custom_option("total_a_ml", 0.0)
-        self.total_b_ml = self.set_custom_option("total_b_ml", 0.0)
+        self.total_a_ml = 0.0
+        self.total_b_ml = 0.0
         self.stage3_pulses = 0
         self.current_stage = 1
         self.stage_start_time = None
+        self.is_paused = False
+        self.feed_rate_scale = 1.0
+        self.stage3_window_pulses = []
+        self.set_custom_option("total_a_ml", 0.0)
+        self.set_custom_option("total_b_ml", 0.0)
+        self.set_custom_option("stage3_pulses", 0)
         self.set_custom_option("current_stage", 1)
+        self.set_custom_option("stage_start_time", 0.0)
+        self.set_custom_option("is_paused", False)
+        self.set_custom_option("feed_rate_scale", 1.0)
         self.calculate_stoichiometry()
         self.update_mass_and_volume_estimates()
         return "Totals & stage reset."
 
+    def cmd_trim_minus_10(self, args_dict):
+        scale = float(self.feed_rate_scale or 1.0)
+        self.feed_rate_scale = max(0.1, round(scale - 0.10, 2))
+        self.set_custom_option("feed_rate_scale", self.feed_rate_scale)
+        return f"Feed rate trimmed down to {int(self.feed_rate_scale * 100)}%."
+
+    def cmd_trim_plus_10(self, args_dict):
+        scale = float(self.feed_rate_scale or 1.0)
+        self.feed_rate_scale = min(2.0, round(scale + 0.10, 2))
+        self.set_custom_option("feed_rate_scale", self.feed_rate_scale)
+        return f"Feed rate increased to {int(self.feed_rate_scale * 100)}%."
+
+    def cmd_trim_foam_backoff(self, args_dict):
+        scale = float(self.feed_rate_scale or 1.0)
+        self.feed_rate_scale = max(0.1, round(scale - 0.25, 2))
+        self.set_custom_option("feed_rate_scale", self.feed_rate_scale)
+        return f"Foam backoff applied! Feed rate reduced to {int(self.feed_rate_scale * 100)}%."
+
+    def cmd_trim_reset(self, args_dict):
+        self.feed_rate_scale = 1.0
+        self.set_custom_option("feed_rate_scale", 1.0)
+        return "Feed rate trim reset to 100%."
+
     def function_status(self):
-        stages = {1: "Stage 1 (Hold/Idle)", 2: "Stage 2 (Active Growth)", 3: "Stage 3 (Product/PHA Phase)"}
+        stages = {1: "Stage 1 (Hold/Idle)", 2: "Stage 2 (Active Growth)", 3: "Stage 3 (Product / Accumulation Phase)"}
         elapsed = f"{(time.time() - self.stage_start_time)/3600.0:.2f} h" if self.stage_start_time and self.current_stage > 1 else "0.00 h"
         
         mode_str = "Stoichiometric Model" if self.calc_mode == 'stoichiometric_balance' else "Direct Rates"
@@ -811,15 +942,22 @@ class CustomModule(AbstractFunction):
 
         n_progress = f"{self.cumulative_n_delivered_g:.2f}g / {self.target_n_mass_g:.2f}g ({min(100.0, (self.cumulative_n_delivered_g/max(self.target_n_mass_g, 1e-3))*100.0):.1f}%)" if self.target_n_mass_g > 0 else "N/A"
 
+        scale_pct = int((self.feed_rate_scale or 1.0) * 100)
+        scale_badge = f"<span style='color: {'#e67e22' if scale_pct != 100 else '#2ecc71'}; font-weight: bold;'>{scale_pct}%</span>"
+        state_badge = f"<span style='color: {'#e74c3c' if self.is_paused else '#2ecc71'}; font-weight: bold;'>{'PAUSED' if self.is_paused else 'RUNNING'}</span>"
+
+        now = time.time()
+        recent_hourly = sum(d for ts, d in self.stage3_window_pulses if (now - ts) <= 3600.0)
+
         html = (
-            f"<div style='line-height:1.4;'>"
-            f"<b>Stage:</b> {stages.get(self.current_stage, 'Unknown')} | <b>State:</b> {'PAUSED' if self.is_paused else 'RUNNING'} | <b>Elapsed:</b> {elapsed}<br>"
-            f"<b>Mode:</b> {mode_str} | <b>Target Ratio (A:B):</b> {ratio_disp:.2f}:1 | <b>mu:</b> {self.growth_rate_mu:.3f} h⁻¹<br>"
+            f"<div style='line-height:1.4; font-family: sans-serif; font-size: 13px;'>"
+            f"<b>Stage:</b> <b>{stages.get(self.current_stage, 'Unknown')}</b> | <b>State:</b> {state_badge} | <b>Elapsed:</b> {elapsed} | <b>Feed Trim:</b> {scale_badge}<br>"
+            f"<b>Mode:</b> {mode_str} | <b>Target Ratio (A:B):</b> {ratio_disp:.2f}:1 | <b>&mu;:</b> {self.growth_rate_mu:.3f} h<sup>-1</sup><br>"
             f"<b>Volume V(t):</b> {self.current_volume_l:.2f} L | <b>Est. Biomass X(t):</b> {self.current_biomass_g_l:.2f} g/L<br>"
-            f"<b>Pump A (Carbon):</b> {self.rate_a_ml_h:.2f} mL/h (F0: {f0_a_disp:.2f}) | Total: {self.total_a_ml:.2f} mL ({self.cumulative_c_delivered_g:.2f} g)<br>"
-            f"<b>Pump B (Nitrogen):</b> {self.rate_b_ml_h:.2f} mL/h (F0: {f0_b_disp:.2f}) | Total: {self.total_b_ml:.2f} mL ({self.cumulative_n_delivered_g:.2f} g)<br>"
+            f"<b>Pump A (Feed A / Carbon):</b> {self.rate_a_ml_h:.2f} mL/h (F0: {f0_a_disp:.2f}) | Total: {self.total_a_ml:.2f} mL ({self.cumulative_c_delivered_g:.2f} g)<br>"
+            f"<b>Pump B (Feed B / Nitrogen):</b> {self.rate_b_ml_h:.2f} mL/h (F0: {f0_b_disp:.2f}) | Total: {self.total_b_ml:.2f} mL ({self.cumulative_n_delivered_g:.2f} g)<br>"
             f"<b>N-Target Progress:</b> {n_progress}<br>"
-            f"<b>Stage 3 Dosing:</b> {self.stage3_pulses} pulses delivered | Policy: {self.stage3_pump_b_action}"
+            f"<b>Stage 3 Sensor-Stat:</b> {self.stage3_pulses} pulses | Rolling 1h Dose: {recent_hourly:.2f}/{self.stage3_max_rate_clamp_ml_h or 15.0:.1f} mL | Policy: {self.stage3_pump_b_action}"
             f"</div>"
         )
         return {'string_status': html, 'error': []}
