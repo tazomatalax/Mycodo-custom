@@ -150,6 +150,15 @@ This Function implements PID-based control for maintaining a dissolved oxygen (D
 
 --------------
 
+Stoichiometric Fed-Batch & C:N Controller
+-----------------------------------------
+
+Details and code: `Mycodo-custom/custom_functions/pha fedbatch controller/ <https://github.com/kizniche/Mycodo-custom/blob/master/custom_functions/pha%20fedbatch%20controller>`__
+
+Advanced dual-pump fed-batch controller for microbial bioreactors and biopolymer/lipid production (e.g. PHA, fatty acids, lipids). Implements first-principles stoichiometric mass balances (biomass yields Y_X/S, Y_X/N, dynamic C:N ratios), automated exponential growth feeding, physiological stage transitions (nitrogen mass delivered or DO-spike), and adaptive volume-scaled sensor-stat feedback with maintenance trickle nitrogen feeding.
+
+--------------
+
 CoolBot Clone
 -------------
 
@@ -158,3 +167,4 @@ By `Kyle Gabriel <https://kylegabriel.com/>`__
 Details and code: `Mycodo-custom/custom_functions/coolbot clone/ <https://github.com/kizniche/Mycodo-custom/blob/master/custom_functions/coolbot%20clone>`__
 
 This Controller mimics the functionality of a `CoolBot <https://storeitcold.com>`__, allowing a walking cool room or freezer to be created using an inexpensive air conditioner unit.
+
